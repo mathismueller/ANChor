@@ -50,10 +50,13 @@ class BoseManager: NSObject, IOBluetoothRFCOMMChannelDelegate {
     var deviceName: String = "Bose Device"
     var onUpdate: (() -> Void)?
     
-    // Known Bose Bluetooth name patterns
+    // Known Bose BMAP-capable headphone/earbud name patterns.
+    // Kept specific so generic "Bose" devices (speakers, soundbars) don't get picked.
     private static let bosePatterns = [
-        "Bose", "QC", "QuietComfort", "SoundSport", "NC 700",
-        "Frames", "Sport Earbuds", "Ultra Open"
+        "QC Ultra",
+        "QuietComfort Ultra",
+        "QuietComfort Earbuds",
+        "QC Earbuds"
     ]
     
     override init() {
