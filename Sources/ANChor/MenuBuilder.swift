@@ -233,6 +233,27 @@ public enum MenuBuilder {
                     sidetoneMenu.addItem(item)
                 }
                 menu.addItem(sidetoneItem)
+
+                // Media Playback Controls
+                menu.addItem(sectionHeader("Playback"))
+                let localPlay = NSMenuItem(title: "Play / Pause (Mac)", action: #selector(AppDelegate.toggleLocalPlayback), keyEquivalent: " ")
+                localPlay.keyEquivalentModifierMask = [.command, .shift]
+                localPlay.target = delegate
+                localPlay.image = symbol("playpause")
+                menu.addItem(localPlay)
+
+                if let second = device.secondDevice, second.isConnected {
+                    let remoteTitle = "Play / Pause (\(second.name))"
+                    let remotePlay = NSMenuItem(title: remoteTitle, action: #selector(AppDelegate.toggleRemotePlayback), keyEquivalent: "")
+                    remotePlay.target = delegate
+                    remotePlay.image = symbol("iphone")
+                    menu.addItem(remotePlay)
+                } else {
+                    let remotePlay = NSMenuItem(title: "Play / Pause (Headphones)", action: #selector(AppDelegate.toggleRemotePlayback), keyEquivalent: "")
+                    remotePlay.target = delegate
+                    remotePlay.image = symbol("headphones")
+                    menu.addItem(remotePlay)
+                }
             }
 
             // 5. Device Hardware Settings
@@ -249,6 +270,21 @@ public enum MenuBuilder {
             multiItem.state = device.multipointEnabled ? .on : .off
             multiItem.image = symbol("link")
             menu.addItem(multiItem)
+
+            // Second Connected Bluetooth Device (Multipoint)
+            if let second = device.secondDevice, second.isConnected {
+                let badge = second.isActiveAudioSource ? " (Active Audio)" : ""
+                let devTitle = "Second: \(second.name)\(badge)"
+                let secItem = NSMenuItem(title: devTitle, action: nil, keyEquivalent: "")
+                secItem.isEnabled = false
+                secItem.image = symbol("iphone")
+                menu.addItem(secItem)
+            } else {
+                let secItem = NSMenuItem(title: "Second Device: None", action: nil, keyEquivalent: "")
+                secItem.isEnabled = false
+                secItem.image = symbol("iphone.slash")
+                menu.addItem(secItem)
+            }
 
             // Touch Shortcut Submenu (Press & Hold on right earcup)
             let shortcutMenu = NSMenu()

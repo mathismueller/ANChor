@@ -43,10 +43,12 @@ public enum BMAPOperator: UInt8, Sendable {
 }
 
 public enum BMAPFunctionBlock {
-    public static let deviceInfo: UInt8 = 0
-    public static let settings: UInt8   = 1
-    public static let battery: UInt8    = 2
-    public static let audioModes: UInt8 = 31 // 0x1F
+    public static let deviceInfo: UInt8       = 0
+    public static let settings: UInt8         = 1
+    public static let battery: UInt8          = 2
+    public static let deviceManagement: UInt8 = 4
+    public static let audioManagement: UInt8  = 5
+    public static let audioModes: UInt8       = 31 // 0x1F
 }
 
 public enum BMAPFunction {
@@ -70,6 +72,15 @@ public enum BMAPFunction {
     // Block 2: Battery
     public static let batteryLevel: UInt8    = 2
     public static let batteryState: UInt8    = 3
+
+    // Block 4: DeviceManagement
+    public static let listDevices: UInt8     = 4
+    public static let peerDeviceInfo: UInt8  = 5
+    public static let localMacAddress: UInt8 = 9
+
+    // Block 5: AudioManagement
+    public static let audioSource: UInt8     = 1
+    public static let audioControl: UInt8    = 3
 
     // Block 31 (0x1F): AudioModes
     public static let allModes: UInt8        = 1

@@ -168,3 +168,21 @@ public struct DeviceMetadata: Equatable, Sendable {
         self.productID = productID
     }
 }
+
+// MARK: - Connected Device (Multipoint)
+
+public struct ConnectedDevice: Equatable, Sendable {
+    public let macAddress: String
+    public let name: String
+    public let isConnected: Bool
+    public let isLocalHost: Bool
+    public let isActiveAudioSource: Bool
+
+    public init(macAddress: String, name: String, isConnected: Bool = true, isLocalHost: Bool = false, isActiveAudioSource: Bool = false) {
+        self.macAddress = macAddress
+        self.name = name
+        self.isConnected = isConnected
+        self.isLocalHost = isLocalHost
+        self.isActiveAudioSource = isActiveAudioSource
+    }
+}

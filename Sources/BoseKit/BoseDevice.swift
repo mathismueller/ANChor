@@ -31,6 +31,11 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
     public private(set) var multipointEnabled: Bool = false
     public private(set) var shortcutAction: ShortcutAction = .batteryLevel
     public private(set) var cncFavorites: CncFavorites = CncFavorites()
+    public private(set) var secondDevice: ConnectedDevice? = nil
+    public private(set) var localDevice: ConnectedDevice? = nil
+    public private(set) var activeSourceMac: String? = nil
+    public private(set) var isRemotePlaying: Bool = false
+    private var localMacAddressString: String? = nil
 
     public var onUpdate: (() -> Void)?
 
@@ -312,6 +317,66 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
             }
         }
 
+        // 9. Local MAC Address [4.9]
+        if localMacAddressString == nil {
+            if let resp = sendAndWait(makeBMAPPacket(fblock: BMAPFunctionBlock.deviceManagement, func_id: BMAPFunction.localMacAddress, op: BMAPOperator.get.rawValue)) {
+                if resp.count >= 10 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
+                    let macBytes = Array(resp[4..<10])
+                    localMacAddressString = macBytes.map { String(format: "%02x", $0) }.joined(separator: ":")
+                }
+            }
+        }
+
+        // 10. Active Audio Source [5.1]
+        if let resp = sendAndWait(makeBMAPPacket(fblock: BMAPFunctionBlock.audioManagement, func_id: BMAPFunction.audioSource, op: BMAPOperator.get.rawValue)) {
+            if resp.count >= 13 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
+                let activeMacBytes = Array(resp[7..<13])
+                activeSourceMac = activeMacBytes.map { String(format: "%02x", $0) }.joined(separator: ":")
+            }
+        }
+
+        // 11. Connected Devices [4.4]
+        if let resp = sendAndWait(makeBMAPPacket(fblock: BMAPFunctionBlock.deviceManagement, func_id: BMAPFunction.listDevices, op: BMAPOperator.get.rawValue)) {
+            if resp.count >= 11 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
+                let connMask = resp[4]
+                var offset = 5
+                var slot = 0
+                var foundSecond: ConnectedDevice? = nil
+                var foundLocal: ConnectedDevice? = nil
+                while offset + 6 <= resp.count {
+                    let macBytes = Array(resp[offset..<(offset + 6)])
+                    let macStr = macBytes.map { String(format: "%02x", $0) }.joined(separator: ":")
+                    let isConn = (connMask & (1 << slot)) != 0
+                    let isLocal = (macStr == localMacAddressString)
+                    let isActive = (macStr == activeSourceMac)
+
+                    var devName = isLocal ? "MacBook Pro" : "Bluetooth Device"
+                    if isConn {
+                        if let nameResp = sendAndWait(makeBMAPPacket(fblock: BMAPFunctionBlock.deviceManagement, func_id: BMAPFunction.peerDeviceInfo, op: BMAPOperator.get.rawValue, payload: macBytes)) {
+                            if nameResp.count > 13 {
+                                let nameData = Array(nameResp[13...])
+                                if let str = String(bytes: nameData, encoding: .utf8), !str.isEmpty {
+                                    devName = str
+                                }
+                            }
+                        }
+                    }
+
+                    let dev = ConnectedDevice(macAddress: macStr, name: devName, isConnected: isConn, isLocalHost: isLocal, isActiveAudioSource: isActive)
+                    if isLocal {
+                        foundLocal = dev
+                    } else if isConn {
+                        foundSecond = dev
+                    }
+
+                    offset += 6
+                    slot += 1
+                }
+                secondDevice = foundSecond
+                localDevice = foundLocal
+            }
+        }
+
         DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
     }
 
@@ -463,6 +528,30 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
         sendRawPacket(makeBMAPPacket(fblock: BMAPFunctionBlock.settings, func_id: BMAPFunction.cncFavorites, op: BMAPOperator.setGet.rawValue, payload: arr))
     }
 
+    // MARK: - Remote Media Transport Controls
+
+    public func sendRemotePlay() {
+        log("sendRemotePlay")
+        sendRawPacket(makeBMAPPacket(fblock: BMAPFunctionBlock.audioManagement, func_id: BMAPFunction.audioControl, op: BMAPOperator.start.rawValue, payload: [0x01]))
+        isRemotePlaying = true
+        DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+    }
+
+    public func sendRemotePause() {
+        log("sendRemotePause")
+        sendRawPacket(makeBMAPPacket(fblock: BMAPFunctionBlock.audioManagement, func_id: BMAPFunction.audioControl, op: BMAPOperator.start.rawValue, payload: [0x02]))
+        isRemotePlaying = false
+        DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+    }
+
+    public func toggleRemotePlayback() {
+        if isRemotePlaying {
+            sendRemotePause()
+        } else {
+            sendRemotePlay()
+        }
+    }
+
     private func sendRawPacket(_ packet: [UInt8]) {
         guard let channel = channel else { return }
         var pkt = packet
@@ -535,6 +624,14 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
                 shortcutAction = act
                 DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
             }
+        }
+
+        // Unsolicited Audio Source change [5.1]
+        if bytes.count >= 13 && bytes[0] == BMAPFunctionBlock.audioManagement && bytes[1] == BMAPFunction.audioSource && bytes[2] & 0x0F == BMAPOperator.status.rawValue {
+            let activeMacBytes = Array(bytes[7..<13])
+            activeSourceMac = activeMacBytes.map { String(format: "%02x", $0) }.joined(separator: ":")
+            log("📡 Unsolicited active audio source change: \(activeSourceMac ?? "none")")
+            DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
         }
 
         responseData = bytes
