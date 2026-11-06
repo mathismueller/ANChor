@@ -307,6 +307,10 @@ public enum MenuBuilder {
         volParent.image = symbol(volIcon)
         volParent.submenu = volMenu
 
+        volMenu.addItem(
+          createVolumeSliderItem(current: Int(vol.current), max: Int(vol.max), delegate: delegate))
+        volMenu.addItem(.separator())
+
         let vUp = NSMenuItem(
           title: "Volume Up", action: #selector(AppDelegate.volumeUp), keyEquivalent: "")
         vUp.target = delegate
@@ -329,19 +333,6 @@ public enum MenuBuilder {
           pItem.tag = step
           pItem.state = (vol.current == step) ? .on : .off
           volMenu.addItem(pItem)
-        }
-
-        volMenu.addItem(.separator())
-        volMenu.addItem(sectionHeader("Level (0–16)"))
-        for step in (0...16).reversed() {
-          let pct = Int(round((Double(step) / 16.0) * 100.0))
-          let stepItem = NSMenuItem(
-            title: "Step \(step) · \(pct)%", action: #selector(AppDelegate.setVolumeClicked(_:)),
-            keyEquivalent: "")
-          stepItem.target = delegate
-          stepItem.tag = step
-          stepItem.state = (vol.current == step) ? .on : .off
-          volMenu.addItem(stepItem)
         }
 
         menu.addItem(volParent)
@@ -499,6 +490,44 @@ public enum MenuBuilder {
         .kern: 0.5,
       ]
     )
+    return item
+  }
+
+  public static func createVolumeSliderItem(
+    current: Int, max: Int, delegate: AppDelegate?
+  ) -> NSMenuItem {
+    let item = NSMenuItem()
+    let view = NSView(frame: NSRect(x: 0, y: 0, width: 220, height: 32))
+
+    let iconName =
+      (current == 0)
+      ? "speaker.slash.fill" : (current <= 8 ? "speaker.wave.1.fill" : "speaker.wave.3.fill")
+    let iconImg = NSImage(systemSymbolName: iconName, accessibilityDescription: nil)
+    iconImg?.isTemplate = true
+    let iconView = NSImageView(frame: NSRect(x: 12, y: 8, width: 16, height: 16))
+    iconView.image = iconImg
+    iconView.contentTintColor = .secondaryLabelColor
+    view.addSubview(iconView)
+
+    let maxVal = max > 0 ? max : 16
+    let pct = Int(round((Double(current) / Double(maxVal)) * 100.0))
+    let label = NSTextField(labelWithString: "\(pct)%")
+    label.frame = NSRect(x: 172, y: 8, width: 36, height: 16)
+    label.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+    label.textColor = .secondaryLabelColor
+    label.alignment = .right
+    label.tag = 99
+    view.addSubview(label)
+
+    let slider = NSSlider(
+      value: Double(current), minValue: 0, maxValue: Double(maxVal), target: delegate,
+      action: #selector(AppDelegate.volumeSliderChanged(_:)))
+    slider.frame = NSRect(x: 34, y: 6, width: 134, height: 20)
+    slider.controlSize = .small
+    slider.isContinuous = true
+    view.addSubview(slider)
+
+    item.view = view
     return item
   }
 

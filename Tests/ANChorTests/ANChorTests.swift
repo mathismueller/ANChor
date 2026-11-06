@@ -40,4 +40,20 @@ final class ANChorTests: XCTestCase {
     XCTAssertEqual(MenuBuilder.batterySymbol(forPercent: 25), "battery.25")
     XCTAssertEqual(MenuBuilder.batterySymbol(forPercent: 10), "battery.0")
   }
+
+  func testVolumeSliderItemCreation() {
+    let item = MenuBuilder.createVolumeSliderItem(current: 8, max: 16, delegate: nil)
+    XCTAssertNotNil(item.view)
+    let subviews = item.view?.subviews ?? []
+    XCTAssertEqual(subviews.count, 3)
+
+    let slider = subviews.compactMap { $0 as? NSSlider }.first
+    XCTAssertNotNil(slider)
+    XCTAssertEqual(slider?.doubleValue, 8.0)
+    XCTAssertEqual(slider?.maxValue, 16.0)
+
+    let label = item.view?.viewWithTag(99) as? NSTextField
+    XCTAssertNotNil(label)
+    XCTAssertEqual(label?.stringValue, "50%")
+  }
 }

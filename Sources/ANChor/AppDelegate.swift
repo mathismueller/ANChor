@@ -190,6 +190,21 @@ public class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     bose.volumeDown()
   }
 
+  @objc public func volumeSliderChanged(_ sender: NSSlider) {
+    let level = UInt8(clamping: Int(round(sender.doubleValue)))
+    if let container = sender.superview,
+      let label = container.viewWithTag(99) as? NSTextField
+    {
+      let maxVal = Double(bose.volumeInfo.max > 0 ? bose.volumeInfo.max : 16)
+      let pct = Int(round((sender.doubleValue / maxVal) * 100.0))
+      label.stringValue = "\(pct)%"
+    }
+    if level != bose.volumeInfo.current {
+      bose.log("UI: volumeSliderChanged → \(level)")
+      bose.setVolume(level)
+    }
+  }
+
   @objc public func setVolumeClicked(_ sender: NSMenuItem) {
     let level = UInt8(clamping: sender.tag)
     bose.log("UI: setVolumeClicked → \(level)")
