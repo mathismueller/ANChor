@@ -1,5 +1,6 @@
 import Foundation
 @preconcurrency import IOBluetooth
+import os
 
 /// High-level interface to a connected Bose Bluetooth headphone or earbud.
 public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
@@ -11,7 +12,6 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
   private var btThread: Thread?
   private var btRunLoop: RunLoop?
   private let ready = DispatchSemaphore(value: 0)
-  private let logFile: FileHandle?
   private var reconnectTimer: Timer?
   private var pollTimer: Timer?
 
@@ -46,22 +46,12 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
   private var voiceLanguageId: UInt8 = 1
 
   public override init() {
-    let logPath = "/tmp/bosecontrol.log"
-    if !FileManager.default.fileExists(atPath: logPath) {
-      FileManager.default.createFile(atPath: logPath, contents: nil)
-    }
-    logFile = FileHandle(forWritingAtPath: logPath)
     super.init()
     startBTThread()
   }
 
-  public func log(_ msg: String) {
-    let ts = ISO8601DateFormatter().string(from: Date())
-    let line = "[\(ts)] \(msg)\n"
-    if let data = line.data(using: .utf8) {
-      logFile?.seekToEndOfFile()
-      logFile?.write(data)
-    }
+  public func log(_ msg: String, level: OSLogType = .info) {
+    AppLog.device.log(level: level, "\(msg, privacy: .public)")
   }
 
   private func startBTThread() {
@@ -82,8 +72,11 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
   }
 
   @objc private func doConnect() {
-    guard let discovered = BoseDiscovery.findDevice(log: { [weak self] in self?.log($0) }) else {
-      log("❌ No Bose device found")
+    guard
+      let discovered = BoseDiscovery.findDevice(log: { [weak self] in self?.log($0, level: .debug) }
+      )
+    else {
+      AppLog.bluetooth.error("❌ No Bose device found")
       startReconnectTimer()
       DispatchQueue.main.async { [weak self] in
         self?.isConnected = false
@@ -102,12 +95,12 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
       ?? (usesDirectCNC ? "Noise Cancelling Headphones 700" : "Bose Device")
     metadata.productID = discovered.profile?.productID ?? (usesDirectCNC ? 0x4024 : nil)
 
-    log(
-      "Found: \(dev.name ?? "unknown") [\(dev.addressString ?? "?")] ch=\(targetChannelID) directCNC=\(usesDirectCNC)"
+    AppLog.bluetooth.info(
+      "Found: \(dev.name ?? "unknown", privacy: .public) [\(dev.addressString ?? "?", privacy: .public)] ch=\(self.targetChannelID) directCNC=\(self.usesDirectCNC)"
     )
 
     if !dev.isConnected() {
-      log("openConnection...")
+      AppLog.bluetooth.debug("openConnection...")
       _ = dev.openConnection(nil)
       let deadline = Date().addingTimeInterval(5.0)
       while !dev.isConnected() && Date() < deadline {
@@ -115,16 +108,16 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
       }
     }
 
-    log("Opening RFCOMM ch \(targetChannelID)...")
+    AppLog.bluetooth.info("Opening RFCOMM ch \(self.targetChannelID)...")
     var chan: IOBluetoothRFCOMMChannel? = nil
     let result = dev.openRFCOMMChannelSync(&chan, withChannelID: targetChannelID, delegate: self)
-    log("RFCOMM result: \(result)")
+    AppLog.bluetooth.debug("RFCOMM result: \(result)")
 
     if result == kIOReturnSuccess, let c = chan {
       channel = c
       isConnected = true
       deviceName = dev.name ?? "Bose Device"
-      log("✅ Connected to \(deviceName)")
+      AppLog.bluetooth.notice("✅ Connected to \(self.deviceName, privacy: .public)")
       stopReconnectTimer()
 
       // Save to UserDefaults for 0ms fast-path on next launch
@@ -145,7 +138,7 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
       doRefreshState()
       startPollTimer()
     } else {
-      log("❌ RFCOMM failed: \(result)")
+      AppLog.bluetooth.error("❌ RFCOMM failed: \(result)")
       isConnected = false
       startReconnectTimer()
     }
@@ -171,7 +164,7 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
         let payload = Array(resp[4...])
         if let str = String(bytes: payload, encoding: .utf8) {
           metadata.firmwareVersion = str
-          log("metadata firmware: \(str)")
+          AppLog.device.info("Firmware: \(str, privacy: .public)")
         }
       }
     }
@@ -186,7 +179,7 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
         let payload = Array(resp[4...])
         if let str = String(bytes: payload, encoding: .utf8) {
           metadata.protocolVersion = str
-          log("metadata protocol: \(str)")
+          AppLog.device.info("Protocol: BMAP \(str, privacy: .public)")
         }
       }
     }
@@ -201,7 +194,7 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
         let payload = Array(resp[4...])
         if let str = String(bytes: payload, encoding: .utf8) {
           metadata.serialNumber = str
-          log("metadata serial: \(str)")
+          AppLog.device.info("Serial: \(str, privacy: .public)")
         }
       }
     }
@@ -227,7 +220,7 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
           if Date().timeIntervalSince(lastModeChangeTime) >= 1.5 {
             currentMode = (step <= 5) ? .quiet : .aware
           }
-          log("CNC step \(step) -> \(currentMode.label)")
+          AppLog.device.debug("CNC step \(step) -> \(self.currentMode.label)")
         }
       }
     } else {
@@ -480,7 +473,7 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
 
   @objc private func doSetMode() {
     let mode = pendingMode
-    log("setMode: \(mode.label)")
+    AppLog.device.info("setMode: \(mode.label, privacy: .public)")
     if usesDirectCNC {
       let step: UInt8 = (mode == .quiet) ? 0 : 10
       cncLevel = step
@@ -488,16 +481,16 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
         makeBMAPPacket(
           fblock: BMAPFunctionBlock.settings, funcID: BMAPFunction.cnc,
           op: BMAPOperator.setGet.rawValue, payload: [step, 0x01]))
-      log("✅ CNC switched to \(step) (\(mode.label))")
+      AppLog.device.info("✅ CNC switched to \(step) (\(mode.label, privacy: .public))")
     } else {
       let resp = sendAndWait(
         makeBMAPPacket(
           fblock: BMAPFunctionBlock.audioModes, funcID: BMAPFunction.currentMode,
           op: BMAPOperator.start.rawValue, payload: [mode.rawValue, 0x00]))
       if let r = resp, r.count >= 5 && r[2] & 0x0F == BMAPOperator.result.rawValue {
-        log("✅ Mode switched")
+        AppLog.device.info("✅ Mode switched")
       } else {
-        log("❌ Mode switch failed")
+        AppLog.device.error("❌ Mode switch failed")
       }
     }
     DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
@@ -516,7 +509,7 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
 
   @objc private func doSetCNC(_ num: NSNumber) {
     let step = num.uint8Value
-    log("setCNCLevel: \(step)")
+    AppLog.device.info("setCNCLevel: \(step)")
     sendRawPacket(
       makeBMAPPacket(
         fblock: BMAPFunctionBlock.settings, funcID: BMAPFunction.cnc,
@@ -542,7 +535,7 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
     guard args.count >= 2 else { return }
     let bandId = args[0]
     let val = args[1]
-    log("setEQBand: band=\(bandId), val=\(val)")
+    AppLog.device.info("setEQBand: band=\(bandId), val=\(val)")
     sendRawPacket(
       makeBMAPPacket(
         fblock: BMAPFunctionBlock.settings, funcID: BMAPFunction.equalizer,
@@ -559,7 +552,7 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
 
   @objc private func doSetSidetone(_ num: NSNumber) {
     let val = num.uint8Value
-    log("setSidetone: \(val)")
+    AppLog.device.info("setSidetone: \(val)")
     sendRawPacket(
       makeBMAPPacket(
         fblock: BMAPFunctionBlock.settings, funcID: BMAPFunction.sidetone,
@@ -577,7 +570,7 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
   @objc private func doSetVoicePrompts(_ num: NSNumber) {
     let en = num.boolValue
     let payloadByte = (en ? 0x20 : 0x00) | (voiceLanguageId & 0x1F)
-    log("setVoicePrompts: enabled=\(en)")
+    AppLog.device.info("setVoicePrompts: enabled=\(en)")
     sendRawPacket(
       makeBMAPPacket(
         fblock: BMAPFunctionBlock.settings, funcID: BMAPFunction.voicePrompts,
@@ -594,7 +587,7 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
 
   @objc private func doSetMultipoint(_ num: NSNumber) {
     let en = num.boolValue
-    log("setMultipoint: \(en)")
+    AppLog.device.info("setMultipoint: \(en)")
     sendRawPacket(
       makeBMAPPacket(
         fblock: BMAPFunctionBlock.settings, funcID: BMAPFunction.multipoint,
@@ -611,7 +604,7 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
 
   @objc private func doSetShortcut(_ num: NSNumber) {
     let act = num.uint8Value
-    log("setShortcutAction: \(act)")
+    AppLog.device.info("setShortcutAction: \(act)")
     // button_id 0x80 (Shortcut touch surface), event 0x05 (press and hold)
     sendRawPacket(
       makeBMAPPacket(
@@ -651,7 +644,7 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
 
   @objc private func doSetCncFavorites(_ arr: [UInt8]) {
     guard arr.count == 4 else { return }
-    log("setCncFavorites: idx=\(arr[0]) p0=\(arr[1]) p1=\(arr[2]) p2=\(arr[3])")
+    AppLog.device.info("setCncFavorites: idx=\(arr[0]) p0=\(arr[1]) p1=\(arr[2]) p2=\(arr[3])")
     sendRawPacket(
       makeBMAPPacket(
         fblock: BMAPFunctionBlock.settings, funcID: BMAPFunction.cncFavorites,
@@ -661,7 +654,7 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
   // MARK: - Remote Media Transport Controls
 
   public func sendRemotePlay() {
-    log("sendRemotePlay")
+    AppLog.device.info("sendRemotePlay")
     sendRawPacket(
       makeBMAPPacket(
         fblock: BMAPFunctionBlock.audioManagement, funcID: BMAPFunction.audioControl,
@@ -671,7 +664,7 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
   }
 
   public func sendRemotePause() {
-    log("sendRemotePause")
+    AppLog.device.info("sendRemotePause")
     sendRawPacket(
       makeBMAPPacket(
         fblock: BMAPFunctionBlock.audioManagement, funcID: BMAPFunction.audioControl,
@@ -713,7 +706,7 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
 
   @objc private func doSetVolume(_ num: NSNumber) {
     let lvl = num.uint8Value
-    log("setVolume: \(lvl)")
+    AppLog.device.info("setVolume: \(lvl)")
     sendRawPacket(
       makeBMAPPacket(
         fblock: BMAPFunctionBlock.audioManagement, funcID: BMAPFunction.volume,
@@ -738,7 +731,7 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
       return channel.writeSync(buf.baseAddress!, length: UInt16(buf.count)) == kIOReturnSuccess
     }
     guard writeOK else {
-      log("write FAILED")
+      AppLog.protocol.error("BMAP write failed")
       return nil
     }
 
@@ -756,16 +749,20 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
   ) {
     let bytes = Array(
       UnsafeBufferPointer(start: ptr.assumingMemoryBound(to: UInt8.self), count: len))
-    log("RX(\(len)): \(bytes.prefix(20).map{String(format:"%02x",$0)}.joined(separator:" "))")
+    AppLog.protocol.debug(
+      "RX(\(len, privacy: .public)): \(bytes.prefix(20).map { String(format: "%02x", $0) }.joined(separator: " "), privacy: .public)"
+    )
 
     // Unsolicited mode change [31.3]
     if bytes.count >= 5 && bytes[0] == BMAPFunctionBlock.audioModes
       && bytes[1] == BMAPFunction.currentMode && bytes[2] & 0x0F == BMAPOperator.status.rawValue
     {
       if let mode = NoiseMode(rawValue: bytes[4]) {
-        log("📡 Unsolicited mode change: \(mode.label)")
-        currentMode = mode
-        DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+        if mode != currentMode {
+          AppLog.device.info("📡 Unsolicited mode change: \(mode.label, privacy: .public)")
+          currentMode = mode
+          DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+        }
       }
     }
 
@@ -774,12 +771,16 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
       && bytes[2] & 0x0F == BMAPOperator.status.rawValue
     {
       let step = bytes[5]
+      let stepChanged = (step != cncLevel)
       cncLevel = step
       if Date().timeIntervalSince(lastModeChangeTime) >= 1.5 {
         let mode: NoiseMode = (step <= 5) ? .quiet : .aware
-        log("📡 Unsolicited CNC change: step \(step) -> \(mode.label)")
-        currentMode = mode
-        DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+        if stepChanged || mode != currentMode {
+          AppLog.device.info(
+            "📡 CNC change: step \(step) -> \(mode.label, privacy: .public)")
+          currentMode = mode
+          DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+        }
       }
     }
 
@@ -791,9 +792,15 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
       let p0 = Int(bytes[5])
       let p1 = Int(bytes[6])
       let p2 = Int(bytes[7])
-      cncFavorites = CncFavorites(activeIndex: actIdx, preset0: p0, preset1: p1, preset2: p2)
-      log("📡 Unsolicited CNC favorites change: active=\(actIdx) [\(p0), \(p1), \(p2)]")
-      DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+      let newFav = CncFavorites(activeIndex: actIdx, preset0: p0, preset1: p1, preset2: p2)
+      if newFav.activeIndex != cncFavorites.activeIndex || newFav.preset0 != cncFavorites.preset0
+        || newFav.preset1 != cncFavorites.preset1 || newFav.preset2 != cncFavorites.preset2
+      {
+        AppLog.device.info(
+          "📡 CNC favorites change: active=\(actIdx) [\(p0), \(p1), \(p2)]")
+        cncFavorites = newFav
+        DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+      }
     }
 
     // Button status / confirmation [1.9]
@@ -802,9 +809,11 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
     {
       let actRaw = bytes[6]
       if let act = ShortcutAction(rawValue: actRaw) {
-        log("📡 Button shortcut confirmed: \(act.label)")
-        shortcutAction = act
-        DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+        if act != shortcutAction {
+          AppLog.device.info("📡 Button shortcut confirmed: \(act.label, privacy: .public)")
+          shortcutAction = act
+          DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+        }
       }
     }
 
@@ -813,9 +822,14 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
       && bytes[1] == BMAPFunction.audioSource && bytes[2] & 0x0F == BMAPOperator.status.rawValue
     {
       let activeMacBytes = Array(bytes[7..<13])
-      activeSourceMac = activeMacBytes.map { String(format: "%02x", $0) }.joined(separator: ":")
-      log("📡 Unsolicited active audio source change: \(activeSourceMac ?? "none")")
-      DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+      let newMac = activeMacBytes.map { String(format: "%02x", $0) }.joined(separator: ":")
+      if newMac != activeSourceMac {
+        activeSourceMac = newMac
+        AppLog.device.info(
+          "📡 Active audio source change: \(newMac, privacy: .public)"
+        )
+        DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+      }
     }
 
     // Unsolicited Volume change [5.5]
@@ -824,9 +838,12 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
     {
       let maxVol = bytes[4]
       let curVol = bytes[5]
-      volumeInfo = VolumeInfo(current: curVol, max: maxVol)
-      log("📡 Unsolicited volume change: \(curVol)/\(maxVol) (\(volumeInfo.percentage)%)")
-      DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+      if curVol != volumeInfo.current || maxVol != volumeInfo.max {
+        volumeInfo = VolumeInfo(current: curVol, max: maxVol)
+        AppLog.device.info(
+          "📡 Volume change: \(curVol)/\(maxVol) (\(self.volumeInfo.percentage)%)")
+        DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+      }
     }
 
     responseData = bytes
@@ -834,7 +851,7 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
   }
 
   public func rfcommChannelClosed(_ rfcommChannel: IOBluetoothRFCOMMChannel!) {
-    log("RFCOMM CLOSED")
+    AppLog.bluetooth.notice("RFCOMM channel closed")
     channel = nil
     isConnected = false
     stopPollTimer()
@@ -853,7 +870,7 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
     reconnectTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
       guard let self = self else { return }
       if self.channel == nil {
-        self.log("Auto-reconnect attempt...")
+        AppLog.bluetooth.info("Auto-reconnect attempt...")
         self.doConnect()
       }
       if self.channel != nil {

@@ -1,5 +1,6 @@
 import Foundation
 @preconcurrency import IOBluetooth
+import os
 
 public struct DiscoveredBoseDevice: Sendable {
   public let device: IOBluetoothDevice
@@ -23,6 +24,7 @@ public struct DiscoveredBoseDevice: Sendable {
 public enum BoseDiscovery {
   public static func findDevice(log: ((String) -> Void)? = nil) -> DiscoveredBoseDevice? {
     guard let paired = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] else {
+      AppLog.bluetooth.info("No paired devices found")
       log?("No paired devices found")
       return nil
     }
@@ -35,12 +37,14 @@ public enum BoseDiscovery {
     // 1. Fast-Path: if last-used Bose device is currently connected, use it instantly (0 ms)
     if let addr = savedAddr, let dev = IOBluetoothDevice(addressString: addr), dev.isConnected() {
       let ch: BluetoothRFCOMMChannelID = savedChannel > 0 ? savedChannel : (savedDirectCNC ? 9 : 2)
-      log?(
+      let msg =
         "⚡ Fast-path connect to saved device: \(dev.name ?? addr) [\(addr)] ch=\(ch) directCNC=\(savedDirectCNC)"
-      )
+      AppLog.bluetooth.info("\(msg, privacy: .public)")
+      log?(msg)
       return DiscoveredBoseDevice(device: dev, channelID: ch, usesDirectCNC: savedDirectCNC)
     }
 
+    AppLog.bluetooth.debug("Scanning \(paired.count, privacy: .public) paired devices...")
     log?("Scanning \(paired.count) paired devices...")
 
     // 2. Read persistent ports from Bluetooth plist (<1 ms)
@@ -130,15 +134,17 @@ public enum BoseDiscovery {
       }
 
       if isBose {
-        log?(
+        let msg =
           "  Candidate: \(name) [\(dev.addressString ?? "?")] ch=\(chID) directCNC=\(directCNC) connected=\(dev.isConnected())"
-        )
+        AppLog.bluetooth.debug("\(msg, privacy: .public)")
+        log?(msg)
         candidates.append((dev, chID, directCNC, matchedProfile, dev.isConnected()))
       }
     }
 
     // 3. Fallback: query system_profiler if no candidates found in cache
     if candidates.isEmpty {
+      AppLog.bluetooth.info("No candidates in SDP cache, querying system_profiler...")
       log?("No candidates in SDP cache, querying system_profiler...")
       for info in queryBoseDevicesFromSystem() {
         if let dev = IOBluetoothDevice(addressString: info.mac) {
@@ -147,9 +153,10 @@ public enum BoseDiscovery {
             || info.name.localizedCaseInsensitiveContains("700")
           let chID: BluetoothRFCOMMChannelID =
             persistentChannels[info.mac.lowercased()] ?? (is700 ? 9 : 2)
-          log?(
+          let msg =
             "  Candidate (system_profiler): \(dev.name ?? info.name) [\(info.mac)] ch=\(chID) directCNC=\(is700) connected=\(info.isConnected)"
-          )
+          AppLog.bluetooth.debug("\(msg, privacy: .public)")
+          log?(msg)
           candidates.append((dev, chID, is700, nil, info.isConnected))
         }
       }
