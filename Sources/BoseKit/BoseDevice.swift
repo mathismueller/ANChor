@@ -1,0 +1,503 @@
+import Foundation
+@preconcurrency import IOBluetooth
+
+/// High-level interface to a connected Bose Bluetooth headphone or earbud.
+public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
+    public static let shared = BoseDevice()
+
+    private var channel: IOBluetoothRFCOMMChannel?
+    private var responseData: [UInt8] = []
+    private var responseReceived = false
+    private var btThread: Thread?
+    private var btRunLoop: RunLoop?
+    private let ready = DispatchSemaphore(value: 0)
+    private let logFile: FileHandle?
+    private var reconnectTimer: Timer?
+    private var pollTimer: Timer?
+
+    // MARK: - Public State
+
+    public private(set) var isConnected: Bool = false
+    public private(set) var deviceName: String = "Bose Device"
+    public private(set) var batteryInfo: BatteryInfo = BatteryInfo()
+    public private(set) var currentMode: NoiseMode = .quiet
+    public private(set) var cncLevel: UInt8 = 0
+    public private(set) var equalizer: EqualizerSettings = EqualizerSettings()
+    public private(set) var hasEqualizer: Bool = true
+    public private(set) var usesDirectCNC: Bool = false
+    public private(set) var metadata: DeviceMetadata = DeviceMetadata()
+    public private(set) var sidetone: SidetoneLevel = .medium
+    public private(set) var voicePromptsEnabled: Bool = true
+    public private(set) var multipointEnabled: Bool = false
+
+    public var onUpdate: (() -> Void)?
+
+    private var targetChannelID: BluetoothRFCOMMChannelID = 2
+    private var lastModeChangeTime: Date = Date.distantPast
+    private var pendingMode: NoiseMode = .quiet
+    private var voiceLanguageId: UInt8 = 1
+
+    public override init() {
+        let logPath = "/tmp/bosecontrol.log"
+        if !FileManager.default.fileExists(atPath: logPath) {
+            FileManager.default.createFile(atPath: logPath, contents: nil)
+        }
+        logFile = FileHandle(forWritingAtPath: logPath)
+        super.init()
+        startBTThread()
+    }
+
+    public func log(_ msg: String) {
+        let ts = ISO8601DateFormatter().string(from: Date())
+        let line = "[\(ts)] \(msg)\n"
+        if let data = line.data(using: .utf8) {
+            logFile?.seekToEndOfFile()
+            logFile?.write(data)
+        }
+    }
+
+    private func startBTThread() {
+        btThread = Thread { [weak self] in
+            self?.btRunLoop = RunLoop.current
+            self?.ready.signal()
+            let port = Port()
+            RunLoop.current.add(port, forMode: .default)
+            RunLoop.current.run()
+        }
+        btThread?.name = "BoseKit-BT"
+        btThread?.start()
+        ready.wait()
+    }
+
+    public func connectAsync() {
+        perform(#selector(doConnect), on: btThread!, with: nil, waitUntilDone: false)
+    }
+
+    @objc private func doConnect() {
+        guard let discovered = BoseDiscovery.findDevice(log: { [weak self] in self?.log($0) }) else {
+            log("❌ No Bose device found")
+            startReconnectTimer()
+            DispatchQueue.main.async { [weak self] in
+                self?.isConnected = false
+                self?.onUpdate?()
+            }
+            return
+        }
+
+        let dev = discovered.device
+        targetChannelID = discovered.channelID
+        usesDirectCNC = discovered.usesDirectCNC
+        hasEqualizer = discovered.profile?.hasEqualizer ?? true
+
+        metadata.modelName = discovered.profile?.name ?? (usesDirectCNC ? "Noise Cancelling Headphones 700" : "Bose Device")
+        metadata.productID = discovered.profile?.productID ?? (usesDirectCNC ? 0x4024 : nil)
+
+        log("Found: \(dev.name ?? "unknown") [\(dev.addressString ?? "?")] ch=\(targetChannelID) directCNC=\(usesDirectCNC)")
+
+        if !dev.isConnected() {
+            log("openConnection...")
+            _ = dev.openConnection(nil)
+            let deadline = Date().addingTimeInterval(5.0)
+            while !dev.isConnected() && Date() < deadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+            }
+        }
+
+        log("Opening RFCOMM ch \(targetChannelID)...")
+        var chan: IOBluetoothRFCOMMChannel? = nil
+        let result = dev.openRFCOMMChannelSync(&chan, withChannelID: targetChannelID, delegate: self)
+        log("RFCOMM result: \(result)")
+
+        if result == kIOReturnSuccess, let c = chan {
+            channel = c
+            isConnected = true
+            deviceName = dev.name ?? "Bose Device"
+            log("✅ Connected to \(deviceName)")
+            stopReconnectTimer()
+
+            // Save to UserDefaults for 0ms fast-path on next launch
+            if let addr = dev.addressString {
+                let defaults = UserDefaults.standard
+                defaults.set(addr, forKey: "lastBoseDeviceAddress")
+                defaults.set(Int(targetChannelID), forKey: "lastBoseChannelID")
+                defaults.set(usesDirectCNC, forKey: "lastBoseDirectCNC")
+            }
+
+            // Quick yield then fetch metadata & state
+            let drainEnd = Date().addingTimeInterval(0.05)
+            while Date() < drainEnd {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+            }
+
+            fetchDeviceMetadata()
+            doRefreshState()
+            startPollTimer()
+        } else {
+            log("❌ RFCOMM failed: \(result)")
+            isConnected = false
+            startReconnectTimer()
+        }
+        DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+    }
+
+    public func disconnect() {
+        stopPollTimer()
+        _ = channel?.close()
+        channel = nil
+        isConnected = false
+        DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+    }
+
+    private func fetchDeviceMetadata() {
+        // Query Firmware Version [0.5]
+        if let resp = sendAndWait(makeBMAPPacket(fblock: BMAPFunctionBlock.deviceInfo, func_id: BMAPFunction.firmwareVersion, op: BMAPOperator.get.rawValue)) {
+            if resp.count >= 4 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
+                let payload = Array(resp[4...])
+                if let str = String(bytes: payload, encoding: .utf8) {
+                    metadata.firmwareVersion = str
+                    log("metadata firmware: \(str)")
+                }
+            }
+        }
+
+        // Query Protocol Version [0.1]
+        if let resp = sendAndWait(makeBMAPPacket(fblock: BMAPFunctionBlock.deviceInfo, func_id: BMAPFunction.protocolVersion, op: BMAPOperator.get.rawValue)) {
+            if resp.count >= 4 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
+                let payload = Array(resp[4...])
+                if let str = String(bytes: payload, encoding: .utf8) {
+                    metadata.protocolVersion = str
+                    log("metadata protocol: \(str)")
+                }
+            }
+        }
+
+        // Query Serial Number [0.7]
+        if let resp = sendAndWait(makeBMAPPacket(fblock: BMAPFunctionBlock.deviceInfo, func_id: BMAPFunction.serialNumber, op: BMAPOperator.get.rawValue)) {
+            if resp.count >= 4 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
+                let payload = Array(resp[4...])
+                if let str = String(bytes: payload, encoding: .utf8) {
+                    metadata.serialNumber = str
+                    log("metadata serial: \(str)")
+                }
+            }
+        }
+    }
+
+    public func refreshState() {
+        perform(#selector(doRefreshState), on: btThread!, with: nil, waitUntilDone: false)
+    }
+
+    @objc private func doRefreshState() {
+        guard channel != nil else { return }
+
+        // 1. Noise Mode / CNC [1.5] or [31.3]
+        if usesDirectCNC {
+            if let resp = sendAndWait(makeBMAPPacket(fblock: BMAPFunctionBlock.settings, func_id: BMAPFunction.cnc, op: BMAPOperator.get.rawValue)) {
+                if resp.count >= 6 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
+                    let step = resp[5]
+                    cncLevel = step
+                    if Date().timeIntervalSince(lastModeChangeTime) >= 1.5 {
+                        currentMode = (step <= 5) ? .quiet : .aware
+                    }
+                    log("CNC step \(step) -> \(currentMode.label)")
+                }
+            }
+        } else {
+            if let resp = sendAndWait(makeBMAPPacket(fblock: BMAPFunctionBlock.audioModes, func_id: BMAPFunction.currentMode, op: BMAPOperator.get.rawValue)) {
+                if resp.count >= 5 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
+                    if Date().timeIntervalSince(lastModeChangeTime) >= 1.5 {
+                        if let mode = NoiseMode(rawValue: resp[4]) { currentMode = mode }
+                    }
+                }
+            }
+        }
+
+        // 2. Battery [2.2]
+        if let resp = sendAndWait(makeBMAPPacket(fblock: BMAPFunctionBlock.battery, func_id: BMAPFunction.batteryLevel, op: BMAPOperator.get.rawValue)) {
+            if resp.count >= 5 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
+                let payload = Array(resp[4...])
+                if payload.count == 4 && payload[3] == 0 {
+                    batteryInfo = BatteryInfo(single: Int(payload[0]))
+                } else {
+                    var l: Int? = nil, r: Int? = nil, c: Int? = nil
+                    var i = 0
+                    while i + 3 < payload.count {
+                        let level = Int(payload[i])
+                        let devId = payload[i + 3]
+                        switch devId {
+                        case 1: l = level
+                        case 2: r = level
+                        case 3, 4: c = level
+                        default: break
+                        }
+                        i += 4
+                    }
+                    batteryInfo = BatteryInfo(single: nil, left: l, right: r, caseLevel: c)
+                }
+            }
+        }
+
+        // 3. Equalizer [1.7]
+        if hasEqualizer {
+            if let resp = sendAndWait(makeBMAPPacket(fblock: BMAPFunctionBlock.settings, func_id: BMAPFunction.equalizer, op: BMAPOperator.get.rawValue)) {
+                if resp.count >= 4 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
+                    let payload = Array(resp[4...])
+                    var b = equalizer.bass, m = equalizer.mid, t = equalizer.treble
+                    var i = 0
+                    while i + 3 < payload.count {
+                        let curRaw = payload[i + 2]
+                        let curVal = curRaw < 128 ? Int(curRaw) : Int(curRaw) - 256
+                        let bandId = payload[i + 3]
+                        switch bandId {
+                        case EqBand.bassId: b = curVal
+                        case EqBand.midId:  m = curVal
+                        case EqBand.trebleId: t = curVal
+                        default: break
+                        }
+                        i += 4
+                    }
+                    equalizer = EqualizerSettings(bass: b, mid: m, treble: t)
+                }
+            }
+        }
+
+        // 4. Sidetone [1.11]
+        if let resp = sendAndWait(makeBMAPPacket(fblock: BMAPFunctionBlock.settings, func_id: BMAPFunction.sidetone, op: BMAPOperator.get.rawValue)) {
+            if resp.count >= 6 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
+                let rawLevel = resp[5]
+                if let lvl = SidetoneLevel(rawValue: rawLevel) {
+                    sidetone = lvl
+                }
+            }
+        }
+
+        // 5. Voice Prompts [1.3]
+        if let resp = sendAndWait(makeBMAPPacket(fblock: BMAPFunctionBlock.settings, func_id: BMAPFunction.voicePrompts, op: BMAPOperator.get.rawValue)) {
+            if resp.count >= 5 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
+                let first = resp[4]
+                voicePromptsEnabled = ((first >> 5) & 1) == 1
+                voiceLanguageId = first & 0x1F
+            }
+        }
+
+        // 6. Multipoint [1.10]
+        if let resp = sendAndWait(makeBMAPPacket(fblock: BMAPFunctionBlock.settings, func_id: BMAPFunction.multipoint, op: BMAPOperator.get.rawValue)) {
+            if resp.count >= 5 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
+                multipointEnabled = resp[4] != 0
+            }
+        }
+
+        DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+    }
+
+    // MARK: - Control Actions
+
+    public func setMode(_ mode: NoiseMode) {
+        currentMode = mode
+        lastModeChangeTime = Date()
+        DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+        pendingMode = mode
+        perform(#selector(doSetMode), on: btThread!, with: nil, waitUntilDone: false)
+    }
+
+    @objc private func doSetMode() {
+        let mode = pendingMode
+        log("setMode: \(mode.label)")
+        if usesDirectCNC {
+            let step: UInt8 = (mode == .quiet) ? 0 : 10
+            cncLevel = step
+            sendRawPacket(makeBMAPPacket(fblock: BMAPFunctionBlock.settings, func_id: BMAPFunction.cnc, op: BMAPOperator.setGet.rawValue, payload: [step, 0x01]))
+            log("✅ CNC switched to \(step) (\(mode.label))")
+        } else {
+            let resp = sendAndWait(makeBMAPPacket(fblock: BMAPFunctionBlock.audioModes, func_id: BMAPFunction.currentMode, op: BMAPOperator.start.rawValue, payload: [mode.rawValue, 0x00]))
+            if let r = resp, r.count >= 5 && r[2] & 0x0F == BMAPOperator.result.rawValue {
+                log("✅ Mode switched")
+            } else {
+                log("❌ Mode switch failed")
+            }
+        }
+        DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+    }
+
+    public func setCNCLevel(_ step: UInt8) {
+        let clamped = max(0, min(10, step))
+        cncLevel = clamped
+        currentMode = (clamped <= 5) ? .quiet : .aware
+        lastModeChangeTime = Date()
+        DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+
+        perform(#selector(doSetCNC(_:)), on: btThread!, with: NSNumber(value: clamped), waitUntilDone: false)
+    }
+
+    @objc private func doSetCNC(_ num: NSNumber) {
+        let step = num.uint8Value
+        log("setCNCLevel: \(step)")
+        sendRawPacket(makeBMAPPacket(fblock: BMAPFunctionBlock.settings, func_id: BMAPFunction.cnc, op: BMAPOperator.setGet.rawValue, payload: [step, 0x01]))
+    }
+
+    public func setEqualizerBand(id: UInt8, level: Int) {
+        let clamped = max(-10, min(10, level))
+        switch id {
+        case EqBand.bassId: equalizer.bass = clamped
+        case EqBand.midId: equalizer.mid = clamped
+        case EqBand.trebleId: equalizer.treble = clamped
+        default: break
+        }
+        DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+
+        perform(#selector(doSetEQBand(_:)), on: btThread!, with: [id, UInt8(clamped < 0 ? clamped + 256 : clamped)], waitUntilDone: false)
+    }
+
+    @objc private func doSetEQBand(_ args: [UInt8]) {
+        guard args.count >= 2 else { return }
+        let bandId = args[0]
+        let val = args[1]
+        log("setEQBand: band=\(bandId), val=\(val)")
+        sendRawPacket(makeBMAPPacket(fblock: BMAPFunctionBlock.settings, func_id: BMAPFunction.equalizer, op: BMAPOperator.setGet.rawValue, payload: [val, bandId]))
+    }
+
+    public func setSidetone(_ level: SidetoneLevel) {
+        sidetone = level
+        DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+        perform(#selector(doSetSidetone(_:)), on: btThread!, with: NSNumber(value: level.rawValue), waitUntilDone: false)
+    }
+
+    @objc private func doSetSidetone(_ num: NSNumber) {
+        let val = num.uint8Value
+        log("setSidetone: \(val)")
+        sendRawPacket(makeBMAPPacket(fblock: BMAPFunctionBlock.settings, func_id: BMAPFunction.sidetone, op: BMAPOperator.setGet.rawValue, payload: [0x01, val]))
+    }
+
+    public func setVoicePrompts(enabled: Bool) {
+        voicePromptsEnabled = enabled
+        DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+        perform(#selector(doSetVoicePrompts(_:)), on: btThread!, with: NSNumber(value: enabled), waitUntilDone: false)
+    }
+
+    @objc private func doSetVoicePrompts(_ num: NSNumber) {
+        let en = num.boolValue
+        let payloadByte = (en ? 0x20 : 0x00) | (voiceLanguageId & 0x1F)
+        log("setVoicePrompts: enabled=\(en)")
+        sendRawPacket(makeBMAPPacket(fblock: BMAPFunctionBlock.settings, func_id: BMAPFunction.voicePrompts, op: BMAPOperator.setGet.rawValue, payload: [payloadByte]))
+    }
+
+    public func setMultipoint(enabled: Bool) {
+        multipointEnabled = enabled
+        DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+        perform(#selector(doSetMultipoint(_:)), on: btThread!, with: NSNumber(value: enabled), waitUntilDone: false)
+    }
+
+    @objc private func doSetMultipoint(_ num: NSNumber) {
+        let en = num.boolValue
+        log("setMultipoint: \(en)")
+        sendRawPacket(makeBMAPPacket(fblock: BMAPFunctionBlock.settings, func_id: BMAPFunction.multipoint, op: BMAPOperator.setGet.rawValue, payload: [en ? 0x01 : 0x00]))
+    }
+
+    private func sendRawPacket(_ packet: [UInt8]) {
+        guard let channel = channel else { return }
+        var pkt = packet
+        _ = pkt.withUnsafeMutableBufferPointer { buf in
+            channel.writeSync(buf.baseAddress!, length: UInt16(buf.count))
+        }
+    }
+
+    private func sendAndWait(_ packet: [UInt8], timeout: TimeInterval = 1.0) -> [UInt8]? {
+        guard let channel = channel else { return nil }
+        responseData = []
+        responseReceived = false
+
+        var pkt = packet
+        let writeOK = pkt.withUnsafeMutableBufferPointer { buf -> Bool in
+            return channel.writeSync(buf.baseAddress!, length: UInt16(buf.count)) == kIOReturnSuccess
+        }
+        guard writeOK else { log("write FAILED"); return nil }
+
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline && !responseReceived {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+        return responseReceived ? responseData : nil
+    }
+
+    // MARK: - RFCOMM Delegate
+
+    public func rfcommChannelData(_ rfcommChannel: IOBluetoothRFCOMMChannel!, data ptr: UnsafeMutableRawPointer!, length len: Int) {
+        let bytes = Array(UnsafeBufferPointer(start: ptr.assumingMemoryBound(to: UInt8.self), count: len))
+        log("RX(\(len)): \(bytes.prefix(20).map{String(format:"%02x",$0)}.joined(separator:" "))")
+
+        // Unsolicited mode change [31.3]
+        if bytes.count >= 5 && bytes[0] == BMAPFunctionBlock.audioModes && bytes[1] == BMAPFunction.currentMode && bytes[2] & 0x0F == BMAPOperator.status.rawValue {
+            if let mode = NoiseMode(rawValue: bytes[4]) {
+                log("📡 Unsolicited mode change: \(mode.label)")
+                currentMode = mode
+                DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+            }
+        }
+
+        // Unsolicited CNC change [1.5]
+        if bytes.count >= 6 && bytes[0] == BMAPFunctionBlock.settings && bytes[1] == BMAPFunction.cnc && bytes[2] & 0x0F == BMAPOperator.status.rawValue {
+            let step = bytes[5]
+            cncLevel = step
+            if Date().timeIntervalSince(lastModeChangeTime) >= 1.5 {
+                let mode: NoiseMode = (step <= 5) ? .quiet : .aware
+                log("📡 Unsolicited CNC change: step \(step) -> \(mode.label)")
+                currentMode = mode
+                DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+            }
+        }
+
+        responseData = bytes
+        responseReceived = true
+    }
+
+    public func rfcommChannelClosed(_ rfcommChannel: IOBluetoothRFCOMMChannel!) {
+        log("RFCOMM CLOSED")
+        channel = nil
+        isConnected = false
+        stopPollTimer()
+        startReconnectTimer()
+        DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+    }
+
+    // MARK: - Timers
+
+    private func startReconnectTimer() {
+        stopReconnectTimer()
+        perform(#selector(scheduleReconnectTimer), on: btThread!, with: nil, waitUntilDone: false)
+    }
+
+    @objc private func scheduleReconnectTimer() {
+        reconnectTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            if self.channel == nil {
+                self.log("Auto-reconnect attempt...")
+                self.doConnect()
+            }
+            if self.channel != nil {
+                self.stopReconnectTimer()
+            }
+        }
+    }
+
+    private func stopReconnectTimer() {
+        reconnectTimer?.invalidate()
+        reconnectTimer = nil
+    }
+
+    private func startPollTimer() {
+        stopPollTimer()
+        perform(#selector(schedulePollTimer), on: btThread!, with: nil, waitUntilDone: false)
+    }
+
+    @objc private func schedulePollTimer() {
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+            guard let self = self, self.channel != nil else { return }
+            self.doRefreshState()
+        }
+    }
+
+    private func stopPollTimer() {
+        pollTimer?.invalidate()
+        pollTimer = nil
+    }
+}

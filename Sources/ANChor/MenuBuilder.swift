@@ -1,0 +1,315 @@
+import Cocoa
+import BoseKit
+
+@MainActor
+public enum MenuBuilder {
+    public static func buildMenu(
+        device: BoseDevice,
+        delegate: AppDelegate,
+        showBatteryInBar: Bool,
+        showModeInBar: Bool
+    ) -> NSMenu {
+        let menu = NSMenu()
+        menu.delegate = delegate
+
+        // 1. Device Header & Info Submenu
+        let header = NSMenuItem(title: device.deviceName, action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        header.attributedTitle = NSAttributedString(
+            string: device.deviceName,
+            attributes: [.font: NSFont.boldSystemFont(ofSize: 13)]
+        )
+        menu.addItem(header)
+
+        if device.isConnected {
+            // "Device Details" Submenu
+            let detailsItem = NSMenuItem(title: "Device Details", action: nil, keyEquivalent: "")
+            detailsItem.image = symbol("info.circle")
+            let detailsMenu = NSMenu()
+            detailsItem.submenu = detailsMenu
+
+            let meta = device.metadata
+            let modelName = meta.modelName ?? "Bose Headset"
+            let pidStr = meta.productID != nil ? String(format: "0x%04X", meta.productID!) : ""
+            addInfoRow(to: detailsMenu, title: "Model: \(modelName) \(pidStr)")
+
+            if let fw = meta.firmwareVersion {
+                addInfoRow(to: detailsMenu, title: "Firmware: \(fw)")
+            }
+            if let proto = meta.protocolVersion {
+                addInfoRow(to: detailsMenu, title: "Protocol: BMAP \(proto)")
+            }
+            if let serial = meta.serialNumber {
+                addInfoRow(to: detailsMenu, title: "Serial: \(serial)")
+                detailsMenu.addItem(.separator())
+
+                let copySerial = NSMenuItem(title: "Copy Serial Number", action: #selector(AppDelegate.copySerialNumber), keyEquivalent: "")
+                copySerial.target = delegate
+                detailsMenu.addItem(copySerial)
+            }
+
+            let copyAll = NSMenuItem(title: "Copy Device Info", action: #selector(AppDelegate.copyDeviceInfo), keyEquivalent: "")
+            copyAll.target = delegate
+            detailsMenu.addItem(copyAll)
+
+            menu.addItem(detailsItem)
+        }
+
+        if !device.isConnected {
+            let status = NSMenuItem(title: "Not connected", action: nil, keyEquivalent: "")
+            status.isEnabled = false
+            status.image = symbol("headphones.slash")
+            menu.addItem(status)
+            menu.addItem(.separator())
+            let r = NSMenuItem(title: "Reconnect", action: #selector(AppDelegate.reconnect), keyEquivalent: "")
+            r.target = delegate
+            menu.addItem(r)
+        } else {
+            // 2. Battery Row
+            let batt = device.batteryInfo
+            if let single = batt.single {
+                let b = NSMenuItem(title: "Battery · \(single)%", action: nil, keyEquivalent: "")
+                b.isEnabled = false
+                b.image = symbol(batterySymbol(forPercent: single))
+                menu.addItem(b)
+            } else if batt.hasData {
+                var parts: [String] = []
+                if let l = batt.left { parts.append("L \(l)%") }
+                if let r = batt.right { parts.append("R \(r)%") }
+                if let c = batt.caseLevel { parts.append("Case \(c)%") }
+                let b = NSMenuItem(title: parts.joined(separator: " · "), action: nil, keyEquivalent: "")
+                b.isEnabled = false
+                if let lowest = batt.lowestLevel {
+                    b.image = symbol(batterySymbol(forPercent: lowest))
+                }
+                menu.addItem(b)
+            }
+
+            // 3. Listening Modes
+            menu.addItem(sectionHeader("Listening Mode"))
+            for (i, mode) in NoiseMode.allCases.enumerated() {
+                let item = NSMenuItem(
+                    title: mode.label,
+                    action: #selector(AppDelegate.modeClicked(_:)),
+                    keyEquivalent: "\(i + 1)"
+                )
+                item.keyEquivalentModifierMask = [.command, .option]
+                item.target = delegate
+                item.tag = Int(mode.rawValue)
+                item.state = mode == device.currentMode ? .on : .off
+                item.image = symbol(mode.symbolName)
+                menu.addItem(item)
+            }
+
+            // Granular CNC Levels (0 to 10) for NC 700
+            if device.usesDirectCNC {
+                let cncSub = NSMenu()
+                let cncParent = NSMenuItem(title: "Noise Level (Level \(device.cncLevel))", action: nil, keyEquivalent: "")
+                cncParent.submenu = cncSub
+                cncParent.image = symbol("slider.horizontal.below.rectangle")
+
+                // Step 0: Quiet (Max ANC)
+                let item0 = NSMenuItem(title: "Level 0 (Quiet — Max ANC)", action: #selector(AppDelegate.cncLevelClicked(_:)), keyEquivalent: "")
+                item0.target = delegate
+                item0.tag = 0
+                item0.state = device.cncLevel == 0 ? .on : .off
+                cncSub.addItem(item0)
+
+                cncSub.addItem(.separator())
+
+                // Steps 1 to 9
+                for step in 1...9 {
+                    let desc = (step == 5) ? "Level \(step) (Mid)" : "Level \(step)"
+                    let item = NSMenuItem(title: desc, action: #selector(AppDelegate.cncLevelClicked(_:)), keyEquivalent: "")
+                    item.target = delegate
+                    item.tag = step
+                    item.state = device.cncLevel == step ? .on : .off
+                    cncSub.addItem(item)
+                }
+
+                cncSub.addItem(.separator())
+
+                // Step 10: Aware (Full Transparency)
+                let item10 = NSMenuItem(title: "Level 10 (Aware — Full Transparency)", action: #selector(AppDelegate.cncLevelClicked(_:)), keyEquivalent: "")
+                item10.target = delegate
+                item10.tag = 10
+                item10.state = device.cncLevel == 10 ? .on : .off
+                cncSub.addItem(item10)
+
+                menu.addItem(cncParent)
+            }
+
+            // 4. Equalizer Submenu
+            if device.hasEqualizer {
+                menu.addItem(sectionHeader("Audio"))
+                let eqMenu = NSMenu()
+                let eqItem = NSMenuItem(title: "Equalizer", action: nil, keyEquivalent: "")
+                eqItem.image = symbol("slider.horizontal.3")
+                eqItem.submenu = eqMenu
+
+                let eq = device.equalizer
+                let summary = "Bass: \(formatDB(eq.bass))   Mid: \(formatDB(eq.mid))   Treble: \(formatDB(eq.treble))"
+                let currentItem = NSMenuItem(title: summary, action: nil, keyEquivalent: "")
+                currentItem.isEnabled = false
+                eqMenu.addItem(currentItem)
+                eqMenu.addItem(.separator())
+
+                // Quick EQ Presets
+                eqMenu.addItem(sectionHeader("Presets"))
+                addPresetItem(to: eqMenu, title: "Flat (0 / 0 / 0)", delegate: delegate, bass: 0, mid: 0, treble: 0, active: eq.bass == 0 && eq.mid == 0 && eq.treble == 0)
+                addPresetItem(to: eqMenu, title: "Bass Boost (+4 / +1 / +2)", delegate: delegate, bass: 4, mid: 1, treble: 2, active: eq.bass == 4 && eq.mid == 1 && eq.treble == 2)
+                addPresetItem(to: eqMenu, title: "Vocal Boost (-1 / +3 / +1)", delegate: delegate, bass: -1, mid: 3, treble: 1, active: eq.bass == -1 && eq.mid == 3 && eq.treble == 1)
+                addPresetItem(to: eqMenu, title: "Treble Boost (+1 / 0 / +4)", delegate: delegate, bass: 1, mid: 0, treble: 4, active: eq.bass == 1 && eq.mid == 0 && eq.treble == 4)
+
+                eqMenu.addItem(.separator())
+                addBandAdjustment(to: eqMenu, bandName: "Bass", bandId: EqBand.bassId, current: eq.bass, delegate: delegate)
+                addBandAdjustment(to: eqMenu, bandName: "Mid", bandId: EqBand.midId, current: eq.mid, delegate: delegate)
+                addBandAdjustment(to: eqMenu, bandName: "Treble", bandId: EqBand.trebleId, current: eq.treble, delegate: delegate)
+
+                menu.addItem(eqItem)
+
+                // Self Voice / Sidetone Submenu
+                let sidetoneMenu = NSMenu()
+                let sidetoneItem = NSMenuItem(title: "Self Voice (Sidetone)", action: nil, keyEquivalent: "")
+                sidetoneItem.image = symbol("waveform")
+                sidetoneItem.submenu = sidetoneMenu
+
+                for lvl in [SidetoneLevel.off, SidetoneLevel.low, SidetoneLevel.medium, SidetoneLevel.high] {
+                    let item = NSMenuItem(title: lvl.label, action: #selector(AppDelegate.sidetoneClicked(_:)), keyEquivalent: "")
+                    item.target = delegate
+                    item.tag = Int(lvl.rawValue)
+                    item.state = device.sidetone == lvl ? .on : .off
+                    sidetoneMenu.addItem(item)
+                }
+                menu.addItem(sidetoneItem)
+            }
+
+            // 5. Device Hardware Settings
+            menu.addItem(sectionHeader("Settings"))
+
+            let voiceItem = NSMenuItem(title: "Voice Prompts", action: #selector(AppDelegate.toggleVoicePrompts), keyEquivalent: "")
+            voiceItem.target = delegate
+            voiceItem.state = device.voicePromptsEnabled ? .on : .off
+            voiceItem.image = symbol("bubble.left")
+            menu.addItem(voiceItem)
+
+            let multiItem = NSMenuItem(title: "Multipoint (2 Devices)", action: #selector(AppDelegate.toggleMultipoint), keyEquivalent: "")
+            multiItem.target = delegate
+            multiItem.state = device.multipointEnabled ? .on : .off
+            multiItem.image = symbol("link")
+            menu.addItem(multiItem)
+        }
+
+        // 6. Menu Bar Display Settings
+        menu.addItem(sectionHeader("Menu Bar"))
+
+        let battToggle = NSMenuItem(title: "Show Battery", action: #selector(AppDelegate.toggleBattery), keyEquivalent: "")
+        battToggle.target = delegate
+        battToggle.state = showBatteryInBar ? .on : .off
+        menu.addItem(battToggle)
+
+        let modeToggle = NSMenuItem(title: "Show Mode Icon", action: #selector(AppDelegate.toggleMode), keyEquivalent: "")
+        modeToggle.target = delegate
+        modeToggle.state = showModeInBar ? .on : .off
+        menu.addItem(modeToggle)
+
+        menu.addItem(.separator())
+        let sound = NSMenuItem(title: "Open Sound Settings…", action: #selector(AppDelegate.openSoundSettings), keyEquivalent: "")
+        sound.target = delegate
+        menu.addItem(sound)
+
+        let q = NSMenuItem(title: "Quit ANChor", action: #selector(AppDelegate.quit), keyEquivalent: "q")
+        q.keyEquivalentModifierMask = [.command]
+        q.target = delegate
+        menu.addItem(q)
+
+        return menu
+    }
+
+    private static func addInfoRow(to menu: NSMenu, title: String) {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        item.attributedTitle = NSAttributedString(
+            string: title,
+            attributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
+                .foregroundColor: NSColor.secondaryLabelColor
+            ]
+        )
+        menu.addItem(item)
+    }
+
+    private static func addPresetItem(
+        to menu: NSMenu,
+        title: String,
+        delegate: AppDelegate,
+        bass: Int,
+        mid: Int,
+        treble: Int,
+        active: Bool
+    ) {
+        let item = NSMenuItem(title: title, action: #selector(AppDelegate.presetClicked(_:)), keyEquivalent: "")
+        item.target = delegate
+        item.representedObject = [bass, mid, treble]
+        item.state = active ? .on : .off
+        menu.addItem(item)
+    }
+
+    private static func addBandAdjustment(
+        to menu: NSMenu,
+        bandName: String,
+        bandId: UInt8,
+        current: Int,
+        delegate: AppDelegate
+    ) {
+        let sub = NSMenu()
+        let parent = NSMenuItem(title: "\(bandName): \(formatDB(current))", action: nil, keyEquivalent: "")
+        parent.submenu = sub
+
+        for level in stride(from: 10, through: -10, by: -1) {
+            let item = NSMenuItem(title: formatDB(level), action: #selector(AppDelegate.eqBandClicked(_:)), keyEquivalent: "")
+            item.target = delegate
+            item.representedObject = ["bandId": Int(bandId), "level": level]
+            item.state = (level == current) ? .on : .off
+            sub.addItem(item)
+        }
+        menu.addItem(parent)
+    }
+
+    private static func formatDB(_ val: Int) -> String {
+        return val > 0 ? "+\(val) dB" : "\(val) dB"
+    }
+
+    private static func symbol(_ name: String) -> NSImage? {
+        let img = NSImage(systemSymbolName: name, accessibilityDescription: nil)
+        img?.isTemplate = true
+        return img
+    }
+
+    private static func sectionHeader(_ title: String) -> NSMenuItem {
+        if #available(macOS 14.0, *) {
+            return NSMenuItem.sectionHeader(title: title)
+        }
+        let item = NSMenuItem(title: title.uppercased(), action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        item.attributedTitle = NSAttributedString(
+            string: title.uppercased(),
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+                .foregroundColor: NSColor.secondaryLabelColor,
+                .kern: 0.5
+            ]
+        )
+        return item
+    }
+
+    private static func batterySymbol(forPercent p: Int) -> String {
+        switch p {
+        case ..<13:  return "battery.0"
+        case ..<38:  return "battery.25"
+        case ..<63:  return "battery.50"
+        case ..<88:  return "battery.75"
+        default:     return "battery.100"
+        }
+    }
+}
