@@ -358,18 +358,10 @@ public enum MenuBuilder {
       voiceItem.image = symbol("bubble.left")
       menu.addItem(voiceItem)
 
-      let multiItem = NSMenuItem(
-        title: "Multipoint (2 Devices)", action: #selector(AppDelegate.toggleMultipoint),
-        keyEquivalent: "")
-      multiItem.target = delegate
-      multiItem.state = device.multipointEnabled ? .on : .off
-      multiItem.image = symbol("link")
-      menu.addItem(multiItem)
-
       // Second Connected Bluetooth Device (Multipoint)
       if let second = device.secondDevice, second.isConnected {
         let badge = second.isActiveAudioSource ? " (Active Audio)" : ""
-        let devTitle = "Second: \(second.name)\(badge)"
+        let devTitle = "Second Device: \(second.name)\(badge)"
         let secItem = NSMenuItem(title: devTitle, action: nil, keyEquivalent: "")
         secItem.isEnabled = false
         secItem.image = symbol("iphone")

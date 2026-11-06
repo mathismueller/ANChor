@@ -126,12 +126,6 @@ public class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     bose.setVoicePrompts(enabled: newState)
   }
 
-  @objc public func toggleMultipoint() {
-    let newState = !bose.multipointEnabled
-    bose.log("UI: toggleMultipoint → \(newState)")
-    bose.setMultipoint(enabled: newState)
-  }
-
   @objc public func shortcutActionClicked(_ sender: NSMenuItem) {
     guard let act = ShortcutAction(rawValue: UInt8(sender.tag)) else { return }
     bose.log("UI: shortcutActionClicked → \(act.label)")
