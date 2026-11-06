@@ -1,0 +1,8 @@
+#!/bin/bash
+set -e
+
+echo "🔍 Running swift-format lint..."
+xcrun swift-format lint --strict -r Sources/ Tests/
+
+echo "🧪 Running swift test..."
+swift test

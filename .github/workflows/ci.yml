@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  lint-and-test:
+    name: Lint & Test
+    runs-on: macos-14
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Lint with swift-format
+        run: xcrun swift-format lint --strict -r Sources/ Tests/
+
+      - name: Run SwiftPM Unit Tests
+        run: swift test --parallel
+
+      - name: Verify Release Build & Bundle
+        run: ./scripts/bundle.sh

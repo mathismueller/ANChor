@@ -26,5 +26,15 @@ let package = Package(
                 .linkedFramework("Cocoa"),
             ]
         ),
+        .testTarget(
+            name: "BoseKitTests",
+            dependencies: ["BoseKit"],
+            path: "Tests/BoseKitTests"
+        ),
+        .testTarget(
+            name: "ANChorTests",
+            dependencies: ["ANChor", "BoseKit"],
+            path: "Tests/ANChorTests"
+        ),
     ]
 )
