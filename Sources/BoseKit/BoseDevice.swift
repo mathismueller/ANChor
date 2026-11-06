@@ -35,6 +35,7 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
     public private(set) var localDevice: ConnectedDevice? = nil
     public private(set) var activeSourceMac: String? = nil
     public private(set) var isRemotePlaying: Bool = false
+    public private(set) var volumeInfo: VolumeInfo = VolumeInfo()
     private var localMacAddressString: String? = nil
 
     public var onUpdate: (() -> Void)?
@@ -377,6 +378,15 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
             }
         }
 
+        // 12. Volume Level [5.5]
+        if let resp = sendAndWait(makeBMAPPacket(fblock: BMAPFunctionBlock.audioManagement, func_id: BMAPFunction.volume, op: BMAPOperator.get.rawValue)) {
+            if resp.count >= 6 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
+                let maxVol = resp[4]
+                let curVol = resp[5]
+                volumeInfo = VolumeInfo(current: curVol, max: maxVol)
+            }
+        }
+
         DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
     }
 
@@ -552,6 +562,33 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
         }
     }
 
+    // MARK: - Remote Volume Controls
+
+    public func setVolume(_ level: UInt8) {
+        let clamped = min(max(level, 0), volumeInfo.max)
+        volumeInfo.current = clamped
+        DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+        perform(#selector(doSetVolume(_:)), on: btThread!, with: NSNumber(value: clamped), waitUntilDone: false)
+    }
+
+    public func volumeUp() {
+        if volumeInfo.current < volumeInfo.max {
+            setVolume(volumeInfo.current + 1)
+        }
+    }
+
+    public func volumeDown() {
+        if volumeInfo.current > 0 {
+            setVolume(volumeInfo.current - 1)
+        }
+    }
+
+    @objc private func doSetVolume(_ num: NSNumber) {
+        let lvl = num.uint8Value
+        log("setVolume: \(lvl)")
+        sendRawPacket(makeBMAPPacket(fblock: BMAPFunctionBlock.audioManagement, func_id: BMAPFunction.volume, op: BMAPOperator.setGet.rawValue, payload: [lvl]))
+    }
+
     private func sendRawPacket(_ packet: [UInt8]) {
         guard let channel = channel else { return }
         var pkt = packet
@@ -631,6 +668,15 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
             let activeMacBytes = Array(bytes[7..<13])
             activeSourceMac = activeMacBytes.map { String(format: "%02x", $0) }.joined(separator: ":")
             log("📡 Unsolicited active audio source change: \(activeSourceMac ?? "none")")
+            DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+        }
+
+        // Unsolicited Volume change [5.5]
+        if bytes.count >= 6 && bytes[0] == BMAPFunctionBlock.audioManagement && bytes[1] == BMAPFunction.volume && bytes[2] & 0x0F == BMAPOperator.status.rawValue {
+            let maxVol = bytes[4]
+            let curVol = bytes[5]
+            volumeInfo = VolumeInfo(current: curVol, max: maxVol)
+            log("📡 Unsolicited volume change: \(curVol)/\(maxVol) (\(volumeInfo.percentage)%)")
             DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
         }
 

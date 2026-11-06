@@ -186,3 +186,20 @@ public struct ConnectedDevice: Equatable, Sendable {
         self.isActiveAudioSource = isActiveAudioSource
     }
 }
+
+// MARK: - Volume Info
+
+public struct VolumeInfo: Equatable, Sendable {
+    public var current: UInt8 // 0..16
+    public var max: UInt8     // 16
+
+    public var percentage: Int {
+        guard max > 0 else { return 0 }
+        return Int(round((Double(current) / Double(max)) * 100.0))
+    }
+
+    public init(current: UInt8 = 8, max: UInt8 = 16) {
+        self.current = current
+        self.max = max
+    }
+}

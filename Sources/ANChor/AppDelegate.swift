@@ -175,6 +175,22 @@ public class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         bose.toggleRemotePlayback()
     }
 
+    @objc public func volumeUp() {
+        bose.log("UI: volumeUp")
+        bose.volumeUp()
+    }
+
+    @objc public func volumeDown() {
+        bose.log("UI: volumeDown")
+        bose.volumeDown()
+    }
+
+    @objc public func setVolumeClicked(_ sender: NSMenuItem) {
+        let level = UInt8(clamping: sender.tag)
+        bose.log("UI: setVolumeClicked → \(level)")
+        bose.setVolume(level)
+    }
+
     @objc public func copySerialNumber() {
         if let serial = bose.metadata.serialNumber {
             NSPasteboard.general.clearContents()

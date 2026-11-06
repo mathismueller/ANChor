@@ -81,6 +81,7 @@ public enum BMAPFunction {
     // Block 5: AudioManagement
     public static let audioSource: UInt8     = 1
     public static let audioControl: UInt8    = 3
+    public static let volume: UInt8          = 5
 
     // Block 31 (0x1F): AudioModes
     public static let allModes: UInt8        = 1

@@ -254,6 +254,50 @@ public enum MenuBuilder {
                     remotePlay.image = symbol("headphones")
                     menu.addItem(remotePlay)
                 }
+
+                // Headphone Remote Volume Submenu
+                let vol = device.volumeInfo
+                let volMenu = NSMenu()
+                let volIcon = (vol.current == 0) ? "speaker.slash.fill" : (vol.current <= 5 ? "speaker.wave.1.fill" : (vol.current <= 11 ? "speaker.wave.2.fill" : "speaker.wave.3.fill"))
+                let volParent = NSMenuItem(title: "Headphone Volume · \(vol.percentage)%", action: nil, keyEquivalent: "")
+                volParent.image = symbol(volIcon)
+                volParent.submenu = volMenu
+
+                let vUp = NSMenuItem(title: "Volume Up", action: #selector(AppDelegate.volumeUp), keyEquivalent: "=")
+                vUp.keyEquivalentModifierMask = [.command]
+                vUp.target = delegate
+                vUp.image = symbol("plus")
+                volMenu.addItem(vUp)
+
+                let vDown = NSMenuItem(title: "Volume Down", action: #selector(AppDelegate.volumeDown), keyEquivalent: "-")
+                vDown.keyEquivalentModifierMask = [.command]
+                vDown.target = delegate
+                vDown.image = symbol("minus")
+                volMenu.addItem(vDown)
+
+                volMenu.addItem(.separator())
+                volMenu.addItem(sectionHeader("Presets"))
+
+                for (pct, step) in [("100%", 16), ("75%", 12), ("50%", 8), ("25%", 4), ("Mute (0%)", 0)] {
+                    let pItem = NSMenuItem(title: pct, action: #selector(AppDelegate.setVolumeClicked(_:)), keyEquivalent: "")
+                    pItem.target = delegate
+                    pItem.tag = step
+                    pItem.state = (vol.current == step) ? .on : .off
+                    volMenu.addItem(pItem)
+                }
+
+                volMenu.addItem(.separator())
+                volMenu.addItem(sectionHeader("Level (0–16)"))
+                for step in (0...16).reversed() {
+                    let pct = Int(round((Double(step) / 16.0) * 100.0))
+                    let stepItem = NSMenuItem(title: "Step \(step) · \(pct)%", action: #selector(AppDelegate.setVolumeClicked(_:)), keyEquivalent: "")
+                    stepItem.target = delegate
+                    stepItem.tag = step
+                    stepItem.state = (vol.current == step) ? .on : .off
+                    volMenu.addItem(stepItem)
+                }
+
+                menu.addItem(volParent)
             }
 
             // 5. Device Hardware Settings
