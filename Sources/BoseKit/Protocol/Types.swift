@@ -104,6 +104,47 @@ public enum SidetoneLevel: UInt8, CaseIterable, Sendable {
     }
 }
 
+// MARK: - Touch Shortcut Action (Press & Hold)
+
+public enum ShortcutAction: UInt8, CaseIterable, Sendable {
+    case batteryLevel    = 3
+    case spotifyTap      = 16
+    case wakeWord        = 7
+
+    public var label: String {
+        switch self {
+        case .batteryLevel:   return "Read Battery Level"
+        case .spotifyTap:     return "Spotify Tap"
+        case .wakeWord:       return "Alexa Wake Word"
+        }
+    }
+}
+
+// MARK: - CNC Favorites (Left Button Presets)
+
+public struct CncFavorites: Equatable, Sendable {
+    public var activeIndex: Int // 0, 1, or 2
+    public var preset0: Int     // 0..10 (default 0: Quiet)
+    public var preset1: Int     // 0..10 (default 5: Mid)
+    public var preset2: Int     // 0..10 (default 10: Aware)
+
+    public init(activeIndex: Int = 0, preset0: Int = 0, preset1: Int = 5, preset2: Int = 10) {
+        self.activeIndex = activeIndex
+        self.preset0 = preset0
+        self.preset1 = preset1
+        self.preset2 = preset2
+    }
+
+    public func level(for index: Int) -> Int {
+        switch index {
+        case 0: return preset0
+        case 1: return preset1
+        case 2: return preset2
+        default: return preset0
+        }
+    }
+}
+
 // MARK: - Device Metadata
 
 public struct DeviceMetadata: Equatable, Sendable {

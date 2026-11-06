@@ -29,6 +29,8 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
     public private(set) var sidetone: SidetoneLevel = .medium
     public private(set) var voicePromptsEnabled: Bool = true
     public private(set) var multipointEnabled: Bool = false
+    public private(set) var shortcutAction: ShortcutAction = .batteryLevel
+    public private(set) var cncFavorites: CncFavorites = CncFavorites()
 
     public var onUpdate: (() -> Void)?
 
@@ -287,6 +289,29 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
             }
         }
 
+        // 7. Shortcut Button [1.9]
+        if let resp = sendAndWait(makeBMAPPacket(fblock: BMAPFunctionBlock.settings, func_id: BMAPFunction.buttons, op: BMAPOperator.get.rawValue)) {
+            if resp.count >= 7 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
+                let actRaw = resp[6]
+                if let act = ShortcutAction(rawValue: actRaw) {
+                    shortcutAction = act
+                }
+            }
+        }
+
+        // 8. CNC Favorites [1.15]
+        if usesDirectCNC {
+            if let resp = sendAndWait(makeBMAPPacket(fblock: BMAPFunctionBlock.settings, func_id: BMAPFunction.cncFavorites, op: BMAPOperator.get.rawValue)) {
+                if resp.count >= 8 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
+                    let actIdx = Int(resp[4])
+                    let p0 = Int(resp[5])
+                    let p1 = Int(resp[6])
+                    let p2 = Int(resp[7])
+                    cncFavorites = CncFavorites(activeIndex: actIdx, preset0: p0, preset1: p1, preset2: p2)
+                }
+            }
+        }
+
         DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
     }
 
@@ -393,6 +418,51 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
         sendRawPacket(makeBMAPPacket(fblock: BMAPFunctionBlock.settings, func_id: BMAPFunction.multipoint, op: BMAPOperator.setGet.rawValue, payload: [en ? 0x01 : 0x00]))
     }
 
+    public func setShortcutAction(_ action: ShortcutAction) {
+        shortcutAction = action
+        DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+        perform(#selector(doSetShortcut(_:)), on: btThread!, with: NSNumber(value: action.rawValue), waitUntilDone: false)
+    }
+
+    @objc private func doSetShortcut(_ num: NSNumber) {
+        let act = num.uint8Value
+        log("setShortcutAction: \(act)")
+        // button_id 0x80 (Shortcut touch surface), event 0x05 (press and hold)
+        sendRawPacket(makeBMAPPacket(fblock: BMAPFunctionBlock.settings, func_id: BMAPFunction.buttons, op: BMAPOperator.setGet.rawValue, payload: [0x80, 0x05, act]))
+    }
+
+    public func setCncFavorites(preset0: Int, preset1: Int, preset2: Int) {
+        let p0 = UInt8(clamping: preset0)
+        let p1 = UInt8(clamping: preset1)
+        let p2 = UInt8(clamping: preset2)
+        let curIdx = UInt8(cncFavorites.activeIndex)
+        cncFavorites.preset0 = Int(p0)
+        cncFavorites.preset1 = Int(p1)
+        cncFavorites.preset2 = Int(p2)
+        DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+        perform(#selector(doSetCncFavorites(_:)), on: btThread!, with: [curIdx, p0, p1, p2], waitUntilDone: false)
+    }
+
+    public func selectCncFavorite(index: Int) {
+        let idx = UInt8(index % 3)
+        let p0 = UInt8(cncFavorites.preset0)
+        let p1 = UInt8(cncFavorites.preset1)
+        let p2 = UInt8(cncFavorites.preset2)
+        cncFavorites.activeIndex = Int(idx)
+        let targetLevel = idx == 0 ? p0 : (idx == 1 ? p1 : p2)
+        cncLevel = targetLevel
+        currentMode = (targetLevel <= 5) ? .quiet : .aware
+        lastModeChangeTime = Date()
+        DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+        perform(#selector(doSetCncFavorites(_:)), on: btThread!, with: [idx, p0, p1, p2], waitUntilDone: false)
+    }
+
+    @objc private func doSetCncFavorites(_ arr: [UInt8]) {
+        guard arr.count == 4 else { return }
+        log("setCncFavorites: idx=\(arr[0]) p0=\(arr[1]) p1=\(arr[2]) p2=\(arr[3])")
+        sendRawPacket(makeBMAPPacket(fblock: BMAPFunctionBlock.settings, func_id: BMAPFunction.cncFavorites, op: BMAPOperator.setGet.rawValue, payload: arr))
+    }
+
     private func sendRawPacket(_ packet: [UInt8]) {
         guard let channel = channel else { return }
         var pkt = packet
@@ -442,6 +512,27 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
                 let mode: NoiseMode = (step <= 5) ? .quiet : .aware
                 log("📡 Unsolicited CNC change: step \(step) -> \(mode.label)")
                 currentMode = mode
+                DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+            }
+        }
+
+        // Unsolicited CNC Favorites change [1.15] (Left physical button press)
+        if bytes.count >= 8 && bytes[0] == BMAPFunctionBlock.settings && bytes[1] == BMAPFunction.cncFavorites && bytes[2] & 0x0F == BMAPOperator.status.rawValue {
+            let actIdx = Int(bytes[4])
+            let p0 = Int(bytes[5])
+            let p1 = Int(bytes[6])
+            let p2 = Int(bytes[7])
+            cncFavorites = CncFavorites(activeIndex: actIdx, preset0: p0, preset1: p1, preset2: p2)
+            log("📡 Unsolicited CNC favorites change: active=\(actIdx) [\(p0), \(p1), \(p2)]")
+            DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+        }
+
+        // Button status / confirmation [1.9]
+        if bytes.count >= 7 && bytes[0] == BMAPFunctionBlock.settings && bytes[1] == BMAPFunction.buttons && bytes[2] & 0x0F == BMAPOperator.status.rawValue {
+            let actRaw = bytes[6]
+            if let act = ShortcutAction(rawValue: actRaw) {
+                log("📡 Button shortcut confirmed: \(act.label)")
+                shortcutAction = act
                 DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
             }
         }

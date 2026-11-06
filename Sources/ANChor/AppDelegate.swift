@@ -125,6 +125,29 @@ public class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         bose.setMultipoint(enabled: newState)
     }
 
+    @objc public func shortcutActionClicked(_ sender: NSMenuItem) {
+        guard let act = ShortcutAction(rawValue: UInt8(sender.tag)) else { return }
+        bose.log("UI: shortcutActionClicked → \(act.label)")
+        bose.setShortcutAction(act)
+    }
+
+    @objc public func selectCncFavorite(_ sender: NSMenuItem) {
+        let index = sender.tag
+        bose.log("UI: selectCncFavorite → index \(index)")
+        bose.selectCncFavorite(index: index)
+    }
+
+    @objc public func setCncPresetLevel(_ sender: NSMenuItem) {
+        let presetIdx = sender.tag / 100
+        let level = sender.tag % 100
+        bose.log("UI: setCncPresetLevel → preset \(presetIdx) = level \(level)")
+        var fav = bose.cncFavorites
+        if presetIdx == 0 { fav.preset0 = level }
+        else if presetIdx == 1 { fav.preset1 = level }
+        else if presetIdx == 2 { fav.preset2 = level }
+        bose.setCncFavorites(preset0: fav.preset0, preset1: fav.preset1, preset2: fav.preset2)
+    }
+
     @objc public func copySerialNumber() {
         if let serial = bose.metadata.serialNumber {
             NSPasteboard.general.clearContents()

@@ -65,6 +65,7 @@ public enum BMAPFunction {
     public static let multipoint: UInt8      = 10
     public static let sidetone: UInt8        = 11
     public static let autoOff: UInt8         = 12
+    public static let cncFavorites: UInt8    = 15
 
     // Block 2: Battery
     public static let batteryLevel: UInt8    = 2

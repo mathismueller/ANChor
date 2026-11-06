@@ -137,6 +137,57 @@ public enum MenuBuilder {
                 cncSub.addItem(item10)
 
                 menu.addItem(cncParent)
+
+                // Left Button Favorites (CNC Presets for NC 700)
+                let favs = device.cncFavorites
+                let favMenu = NSMenu()
+                let favParent = NSMenuItem(title: "Left Button Presets (Favorites)", action: nil, keyEquivalent: "")
+                favParent.submenu = favMenu
+                favParent.image = symbol("star.fill")
+
+                for (idx, level) in [favs.preset0, favs.preset1, favs.preset2].enumerated() {
+                    let levelLabel: String
+                    if level == 0 {
+                        levelLabel = "0 (Quiet)"
+                    } else if level == 10 {
+                        levelLabel = "10 (Aware)"
+                    } else if level == 5 {
+                        levelLabel = "5 (Mid)"
+                    } else {
+                        levelLabel = "\(level)"
+                    }
+
+                    let pSub = NSMenu()
+                    let pItem = NSMenuItem(
+                        title: "Preset \(idx + 1) · Level \(levelLabel)",
+                        action: #selector(AppDelegate.selectCncFavorite(_:)),
+                        keyEquivalent: ""
+                    )
+                    pItem.target = delegate
+                    pItem.tag = idx
+                    pItem.state = (favs.activeIndex == idx) ? .on : .off
+                    pItem.submenu = pSub
+
+                    // Submenu to configure level for this preset
+                    pSub.addItem(sectionHeader("Configure Level"))
+                    for lvl in 0...10 {
+                        let desc: String
+                        if lvl == 0 { desc = "Level 0 (Quiet — Max ANC)" }
+                        else if lvl == 5 { desc = "Level 5 (Mid)" }
+                        else if lvl == 10 { desc = "Level 10 (Aware — Transparency)" }
+                        else { desc = "Level \(lvl)" }
+
+                        let setLvlItem = NSMenuItem(title: desc, action: #selector(AppDelegate.setCncPresetLevel(_:)), keyEquivalent: "")
+                        setLvlItem.target = delegate
+                        setLvlItem.tag = (idx * 100) + lvl
+                        setLvlItem.state = (level == lvl) ? .on : .off
+                        pSub.addItem(setLvlItem)
+                    }
+
+                    favMenu.addItem(pItem)
+                }
+
+                menu.addItem(favParent)
             }
 
             // 4. Equalizer Submenu
@@ -198,6 +249,21 @@ public enum MenuBuilder {
             multiItem.state = device.multipointEnabled ? .on : .off
             multiItem.image = symbol("link")
             menu.addItem(multiItem)
+
+            // Touch Shortcut Submenu (Press & Hold on right earcup)
+            let shortcutMenu = NSMenu()
+            let shortcutItem = NSMenuItem(title: "Touch Shortcut (Hold)", action: nil, keyEquivalent: "")
+            shortcutItem.image = symbol("hand.tap")
+            shortcutItem.submenu = shortcutMenu
+
+            for act in ShortcutAction.allCases {
+                let item = NSMenuItem(title: act.label, action: #selector(AppDelegate.shortcutActionClicked(_:)), keyEquivalent: "")
+                item.target = delegate
+                item.tag = Int(act.rawValue)
+                item.state = device.shortcutAction == act ? .on : .off
+                shortcutMenu.addItem(item)
+            }
+            menu.addItem(shortcutItem)
         }
 
         // 6. Menu Bar Display Settings
