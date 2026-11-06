@@ -115,7 +115,7 @@ public enum ShortcutAction: UInt8, CaseIterable, Sendable {
         switch self {
         case .batteryLevel:   return "Read Battery Level"
         case .spotifyTap:     return "Spotify Tap"
-        case .wakeWord:       return "Alexa Wake Word"
+        case .wakeWord:       return "Enable/Disable Wake Word"
         }
     }
 }
