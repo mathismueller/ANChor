@@ -56,4 +56,22 @@ final class ANChorTests: XCTestCase {
     XCTAssertNotNil(label)
     XCTAssertEqual(label?.stringValue, "50%")
   }
+
+  func testNoiseLevelSliderItemCreation() {
+    let item = MenuBuilder.createNoiseLevelSliderItem(current: 5, delegate: nil)
+    XCTAssertNotNil(item.view)
+    let subviews = item.view?.subviews ?? []
+    XCTAssertEqual(subviews.count, 3)
+
+    let slider = subviews.compactMap { $0 as? NSSlider }.first
+    XCTAssertNotNil(slider)
+    XCTAssertEqual(slider?.doubleValue, 5.0)
+    XCTAssertEqual(slider?.maxValue, 10.0)
+    XCTAssertEqual(slider?.numberOfTickMarks, 11)
+    XCTAssertEqual(slider?.allowsTickMarkValuesOnly, true)
+
+    let label = item.view?.viewWithTag(99) as? NSTextField
+    XCTAssertNotNil(label)
+    XCTAssertEqual(label?.stringValue, "Level 5")
+  }
 }

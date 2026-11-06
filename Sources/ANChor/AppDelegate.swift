@@ -97,6 +97,25 @@ public class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     bose.setCNCLevel(step)
   }
 
+  @objc public func cncSliderChanged(_ sender: NSSlider) {
+    let step = UInt8(clamping: Int(round(sender.doubleValue)))
+    if let container = sender.superview {
+      if let label = container.viewWithTag(99) as? NSTextField {
+        label.stringValue = "Level \(step)"
+      }
+      if let iconView = container.viewWithTag(98) as? NSImageView {
+        let iconName = (step <= 5) ? "waveform.slash" : "ear"
+        let img = NSImage(systemSymbolName: iconName, accessibilityDescription: nil)
+        img?.isTemplate = true
+        iconView.image = img
+      }
+    }
+    if step != bose.cncLevel {
+      bose.log("UI: cncSliderChanged → \(step)")
+      bose.setCNCLevel(step)
+    }
+  }
+
   @objc public func presetClicked(_ sender: NSMenuItem) {
     guard let values = sender.representedObject as? [Int], values.count == 3 else { return }
     bose.log("UI: presetClicked → Bass: \(values[0]), Mid: \(values[1]), Treble: \(values[2])")

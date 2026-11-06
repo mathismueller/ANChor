@@ -107,197 +107,158 @@ public enum MenuBuilder {
 
       // Granular CNC Levels (0 to 10) for NC 700
       if device.usesDirectCNC {
-        let cncSub = NSMenu()
-        let cncParent = NSMenuItem(
-          title: "Noise Level (Level \(device.cncLevel))", action: nil, keyEquivalent: "")
-        cncParent.submenu = cncSub
-        cncParent.image = symbol("slider.horizontal.below.rectangle")
-
-        // Step 0: Quiet (Max ANC)
-        let item0 = NSMenuItem(
-          title: "Level 0 (Quiet — Max ANC)", action: #selector(AppDelegate.cncLevelClicked(_:)),
-          keyEquivalent: "")
-        item0.target = delegate
-        item0.tag = 0
-        item0.state = device.cncLevel == 0 ? .on : .off
-        cncSub.addItem(item0)
-
-        cncSub.addItem(.separator())
-
-        // Steps 1 to 9
-        for step in 1...9 {
-          let desc = (step == 5) ? "Level \(step) (Mid)" : "Level \(step)"
-          let item = NSMenuItem(
-            title: desc, action: #selector(AppDelegate.cncLevelClicked(_:)), keyEquivalent: "")
-          item.target = delegate
-          item.tag = step
-          item.state = device.cncLevel == step ? .on : .off
-          cncSub.addItem(item)
-        }
-
-        cncSub.addItem(.separator())
-
-        // Step 10: Aware (Full Transparency)
-        let item10 = NSMenuItem(
-          title: "Level 10 (Aware — Full Transparency)",
-          action: #selector(AppDelegate.cncLevelClicked(_:)), keyEquivalent: "")
-        item10.target = delegate
-        item10.tag = 10
-        item10.state = device.cncLevel == 10 ? .on : .off
-        cncSub.addItem(item10)
-
-        menu.addItem(cncParent)
-
-        // Left Button Favorites (CNC Presets for NC 700)
-        let favs = device.cncFavorites
-        let favMenu = NSMenu()
-        let favParent = NSMenuItem(
-          title: "Left Button Presets (Favorites)", action: nil, keyEquivalent: "")
-        favParent.submenu = favMenu
-        favParent.image = symbol("star.fill")
-
-        for (idx, level) in [favs.preset0, favs.preset1, favs.preset2].enumerated() {
-          let levelLabel: String
-          if level == 0 {
-            levelLabel = "0 (Quiet)"
-          } else if level == 10 {
-            levelLabel = "10 (Aware)"
-          } else if level == 5 {
-            levelLabel = "5 (Mid)"
-          } else {
-            levelLabel = "\(level)"
-          }
-
-          let pSub = NSMenu()
-          let pItem = NSMenuItem(
-            title: "Preset \(idx + 1) · Level \(levelLabel)",
-            action: #selector(AppDelegate.selectCncFavorite(_:)),
-            keyEquivalent: ""
-          )
-          pItem.target = delegate
-          pItem.tag = idx
-          pItem.state = (favs.activeIndex == idx) ? .on : .off
-          pItem.submenu = pSub
-
-          // Submenu to configure level for this preset
-          pSub.addItem(sectionHeader("Configure Level"))
-          for lvl in 0...10 {
-            let desc: String
-            if lvl == 0 {
-              desc = "Level 0 (Quiet — Max ANC)"
-            } else if lvl == 5 {
-              desc = "Level 5 (Mid)"
-            } else if lvl == 10 {
-              desc = "Level 10 (Aware — Transparency)"
-            } else {
-              desc = "Level \(lvl)"
-            }
-
-            let setLvlItem = NSMenuItem(
-              title: desc, action: #selector(AppDelegate.setCncPresetLevel(_:)), keyEquivalent: "")
-            setLvlItem.target = delegate
-            setLvlItem.tag = (idx * 100) + lvl
-            setLvlItem.state = (level == lvl) ? .on : .off
-            pSub.addItem(setLvlItem)
-          }
-
-          favMenu.addItem(pItem)
-        }
-
-        menu.addItem(favParent)
-      }
-
-      // 4. Equalizer Submenu
-      if device.hasEqualizer {
-        menu.addItem(sectionHeader("Audio"))
-        let eqMenu = NSMenu()
-        let eqItem = NSMenuItem(title: "Equalizer", action: nil, keyEquivalent: "")
-        eqItem.image = symbol("slider.horizontal.3")
-        eqItem.submenu = eqMenu
-
-        let eq = device.equalizer
-        let summary =
-          "Bass: \(formatDB(eq.bass))   Mid: \(formatDB(eq.mid))   Treble: \(formatDB(eq.treble))"
-        let currentItem = NSMenuItem(title: summary, action: nil, keyEquivalent: "")
-        currentItem.isEnabled = false
-        eqMenu.addItem(currentItem)
-        eqMenu.addItem(.separator())
-
-        // Quick EQ Presets
-        eqMenu.addItem(sectionHeader("Presets"))
-        addPresetItem(
-          to: eqMenu, title: "Flat (0 / 0 / 0)", delegate: delegate, bass: 0, mid: 0, treble: 0,
-          active: eq.bass == 0 && eq.mid == 0 && eq.treble == 0)
-        addPresetItem(
-          to: eqMenu, title: "Bass Boost (+4 / +1 / +2)", delegate: delegate, bass: 4, mid: 1,
-          treble: 2, active: eq.bass == 4 && eq.mid == 1 && eq.treble == 2)
-        addPresetItem(
-          to: eqMenu, title: "Vocal Boost (-1 / +3 / +1)", delegate: delegate, bass: -1, mid: 3,
-          treble: 1, active: eq.bass == -1 && eq.mid == 3 && eq.treble == 1)
-        addPresetItem(
-          to: eqMenu, title: "Treble Boost (+1 / 0 / +4)", delegate: delegate, bass: 1, mid: 0,
-          treble: 4, active: eq.bass == 1 && eq.mid == 0 && eq.treble == 4)
-
-        eqMenu.addItem(.separator())
-        addBandAdjustment(
-          to: eqMenu, bandName: "Bass", bandId: EqBand.bassId, current: eq.bass, delegate: delegate)
-        addBandAdjustment(
-          to: eqMenu, bandName: "Mid", bandId: EqBand.midId, current: eq.mid, delegate: delegate)
-        addBandAdjustment(
-          to: eqMenu, bandName: "Treble", bandId: EqBand.trebleId, current: eq.treble,
-          delegate: delegate)
-
-        menu.addItem(eqItem)
-
-        // Self Voice / Sidetone Submenu
-        let sidetoneMenu = NSMenu()
-        let sidetoneItem = NSMenuItem(
-          title: "Self Voice (Sidetone)", action: nil, keyEquivalent: "")
-        sidetoneItem.image = symbol("waveform")
-        sidetoneItem.submenu = sidetoneMenu
-
-        for lvl in [SidetoneLevel.off, SidetoneLevel.low, SidetoneLevel.medium, SidetoneLevel.high]
-        {
-          let item = NSMenuItem(
-            title: lvl.label, action: #selector(AppDelegate.sidetoneClicked(_:)), keyEquivalent: "")
-          item.target = delegate
-          item.tag = Int(lvl.rawValue)
-          item.state = device.sidetone == lvl ? .on : .off
-          sidetoneMenu.addItem(item)
-        }
-        menu.addItem(sidetoneItem)
-
-        // Media Playback Controls
-        menu.addItem(sectionHeader("Playback"))
-        let localPlay = NSMenuItem(
-          title: "Play / Pause (Mac)", action: #selector(AppDelegate.toggleLocalPlayback),
-          keyEquivalent: "")
-        localPlay.target = delegate
-        localPlay.image = symbol("playpause")
-        menu.addItem(localPlay)
-
-        if let second = device.secondDevice, second.isConnected {
-          let remoteTitle = "Play / Pause (\(second.name))"
-          let remotePlay = NSMenuItem(
-            title: remoteTitle, action: #selector(AppDelegate.toggleRemotePlayback),
-            keyEquivalent: "")
-          remotePlay.target = delegate
-          remotePlay.image = symbol("iphone")
-          menu.addItem(remotePlay)
-        } else {
-          let remotePlay = NSMenuItem(
-            title: "Play / Pause (Headphones)", action: #selector(AppDelegate.toggleRemotePlayback),
-            keyEquivalent: "")
-          remotePlay.target = delegate
-          remotePlay.image = symbol("headphones")
-          menu.addItem(remotePlay)
-        }
-
-        // Headphone Remote Volume Slider
-        let vol = device.volumeInfo
         menu.addItem(
-          createVolumeSliderItem(current: Int(vol.current), max: Int(vol.max), delegate: delegate))
+          createNoiseLevelSliderItem(current: Int(device.cncLevel), delegate: delegate))
       }
+
+      // Left Button Favorites (CNC Presets for NC 700)
+      let favs = device.cncFavorites
+      let favMenu = NSMenu()
+      let favParent = NSMenuItem(
+        title: "Left Button Presets (Favorites)", action: nil, keyEquivalent: "")
+      favParent.submenu = favMenu
+      favParent.image = symbol("star.fill")
+
+      for (idx, level) in [favs.preset0, favs.preset1, favs.preset2].enumerated() {
+        let levelLabel: String
+        if level == 0 {
+          levelLabel = "0 (Quiet)"
+        } else if level == 10 {
+          levelLabel = "10 (Aware)"
+        } else if level == 5 {
+          levelLabel = "5 (Mid)"
+        } else {
+          levelLabel = "\(level)"
+        }
+
+        let pSub = NSMenu()
+        let pItem = NSMenuItem(
+          title: "Preset \(idx + 1) · Level \(levelLabel)",
+          action: #selector(AppDelegate.selectCncFavorite(_:)),
+          keyEquivalent: ""
+        )
+        pItem.target = delegate
+        pItem.tag = idx
+        pItem.state = (favs.activeIndex == idx) ? .on : .off
+        pItem.submenu = pSub
+
+        // Submenu to configure level for this preset
+        pSub.addItem(sectionHeader("Configure Level"))
+        for lvl in 0...10 {
+          let desc: String
+          if lvl == 0 {
+            desc = "Level 0 (Quiet — Max ANC)"
+          } else if lvl == 5 {
+            desc = "Level 5 (Mid)"
+          } else if lvl == 10 {
+            desc = "Level 10 (Aware — Transparency)"
+          } else {
+            desc = "Level \(lvl)"
+          }
+
+          let setLvlItem = NSMenuItem(
+            title: desc, action: #selector(AppDelegate.setCncPresetLevel(_:)), keyEquivalent: "")
+          setLvlItem.target = delegate
+          setLvlItem.tag = (idx * 100) + lvl
+          setLvlItem.state = (level == lvl) ? .on : .off
+          pSub.addItem(setLvlItem)
+        }
+
+        favMenu.addItem(pItem)
+      }
+
+      menu.addItem(favParent)
+    }
+
+    // 4. Equalizer Submenu
+    if device.hasEqualizer {
+      menu.addItem(sectionHeader("Audio"))
+      let eqMenu = NSMenu()
+      let eqItem = NSMenuItem(title: "Equalizer", action: nil, keyEquivalent: "")
+      eqItem.image = symbol("slider.horizontal.3")
+      eqItem.submenu = eqMenu
+
+      let eq = device.equalizer
+      let summary =
+        "Bass: \(formatDB(eq.bass))   Mid: \(formatDB(eq.mid))   Treble: \(formatDB(eq.treble))"
+      let currentItem = NSMenuItem(title: summary, action: nil, keyEquivalent: "")
+      currentItem.isEnabled = false
+      eqMenu.addItem(currentItem)
+      eqMenu.addItem(.separator())
+
+      // Quick EQ Presets
+      eqMenu.addItem(sectionHeader("Presets"))
+      addPresetItem(
+        to: eqMenu, title: "Flat (0 / 0 / 0)", delegate: delegate, bass: 0, mid: 0, treble: 0,
+        active: eq.bass == 0 && eq.mid == 0 && eq.treble == 0)
+      addPresetItem(
+        to: eqMenu, title: "Bass Boost (+4 / +1 / +2)", delegate: delegate, bass: 4, mid: 1,
+        treble: 2, active: eq.bass == 4 && eq.mid == 1 && eq.treble == 2)
+      addPresetItem(
+        to: eqMenu, title: "Vocal Boost (-1 / +3 / +1)", delegate: delegate, bass: -1, mid: 3,
+        treble: 1, active: eq.bass == -1 && eq.mid == 3 && eq.treble == 1)
+      addPresetItem(
+        to: eqMenu, title: "Treble Boost (+1 / 0 / +4)", delegate: delegate, bass: 1, mid: 0,
+        treble: 4, active: eq.bass == 1 && eq.mid == 0 && eq.treble == 4)
+
+      eqMenu.addItem(.separator())
+      addBandAdjustment(
+        to: eqMenu, bandName: "Bass", bandId: EqBand.bassId, current: eq.bass, delegate: delegate)
+      addBandAdjustment(
+        to: eqMenu, bandName: "Mid", bandId: EqBand.midId, current: eq.mid, delegate: delegate)
+      addBandAdjustment(
+        to: eqMenu, bandName: "Treble", bandId: EqBand.trebleId, current: eq.treble,
+        delegate: delegate)
+
+      menu.addItem(eqItem)
+
+      // Self Voice / Sidetone Submenu
+      let sidetoneMenu = NSMenu()
+      let sidetoneItem = NSMenuItem(
+        title: "Self Voice (Sidetone)", action: nil, keyEquivalent: "")
+      sidetoneItem.image = symbol("waveform")
+      sidetoneItem.submenu = sidetoneMenu
+
+      for lvl in [SidetoneLevel.off, SidetoneLevel.low, SidetoneLevel.medium, SidetoneLevel.high] {
+        let item = NSMenuItem(
+          title: lvl.label, action: #selector(AppDelegate.sidetoneClicked(_:)), keyEquivalent: "")
+        item.target = delegate
+        item.tag = Int(lvl.rawValue)
+        item.state = device.sidetone == lvl ? .on : .off
+        sidetoneMenu.addItem(item)
+      }
+      menu.addItem(sidetoneItem)
+
+      // Media Playback Controls
+      menu.addItem(sectionHeader("Playback"))
+      let localPlay = NSMenuItem(
+        title: "Play / Pause (Mac)", action: #selector(AppDelegate.toggleLocalPlayback),
+        keyEquivalent: "")
+      localPlay.target = delegate
+      localPlay.image = symbol("playpause")
+      menu.addItem(localPlay)
+
+      if let second = device.secondDevice, second.isConnected {
+        let remoteTitle = "Play / Pause (\(second.name))"
+        let remotePlay = NSMenuItem(
+          title: remoteTitle, action: #selector(AppDelegate.toggleRemotePlayback),
+          keyEquivalent: "")
+        remotePlay.target = delegate
+        remotePlay.image = symbol("iphone")
+        menu.addItem(remotePlay)
+      } else {
+        let remotePlay = NSMenuItem(
+          title: "Play / Pause (Headphones)", action: #selector(AppDelegate.toggleRemotePlayback),
+          keyEquivalent: "")
+        remotePlay.target = delegate
+        remotePlay.image = symbol("headphones")
+        menu.addItem(remotePlay)
+      }
+
+      // Headphone Remote Volume Slider
+      let vol = device.volumeInfo
+      menu.addItem(
+        createVolumeSliderItem(current: Int(vol.current), max: Int(vol.max), delegate: delegate))
 
       // 5. Device Hardware Settings
       menu.addItem(sectionHeader("Settings"))
@@ -487,6 +448,47 @@ public enum MenuBuilder {
       value: Double(current), minValue: 0, maxValue: Double(maxVal), target: delegate,
       action: #selector(AppDelegate.volumeSliderChanged(_:)))
     slider.frame = NSRect(x: 36, y: 6, width: 138, height: 20)
+    slider.controlSize = .small
+    slider.isContinuous = true
+    slider.autoresizingMask = [.width]
+    view.addSubview(slider)
+
+    item.view = view
+    return item
+  }
+
+  public static func createNoiseLevelSliderItem(
+    current: Int, delegate: AppDelegate?
+  ) -> NSMenuItem {
+    let item = NSMenuItem()
+    let view = NSView(frame: NSRect(x: 0, y: 0, width: 230, height: 32))
+    view.autoresizingMask = [.width]
+
+    let iconName = (current <= 5) ? "waveform.slash" : "ear"
+    let iconImg = NSImage(systemSymbolName: iconName, accessibilityDescription: nil)
+    iconImg?.isTemplate = true
+    let iconView = NSImageView(frame: NSRect(x: 14, y: 8, width: 16, height: 16))
+    iconView.image = iconImg
+    iconView.contentTintColor = .secondaryLabelColor
+    iconView.tag = 98
+    view.addSubview(iconView)
+
+    let label = NSTextField(labelWithString: "Level \(current)")
+    label.frame = NSRect(x: 168, y: 8, width: 48, height: 16)
+    label.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+    label.textColor = .secondaryLabelColor
+    label.alignment = .right
+    label.autoresizingMask = [.minXMargin]
+    label.tag = 99
+    view.addSubview(label)
+
+    let slider = NSSlider(
+      value: Double(current), minValue: 0, maxValue: 10, target: delegate,
+      action: #selector(AppDelegate.cncSliderChanged(_:)))
+    slider.frame = NSRect(x: 36, y: 6, width: 126, height: 20)
+    slider.numberOfTickMarks = 11
+    slider.allowsTickMarkValuesOnly = true
+    slider.tickMarkPosition = .below
     slider.controlSize = .small
     slider.isContinuous = true
     slider.autoresizingMask = [.width]
