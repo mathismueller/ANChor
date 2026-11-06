@@ -293,49 +293,10 @@ public enum MenuBuilder {
           menu.addItem(remotePlay)
         }
 
-        // Headphone Remote Volume Submenu
+        // Headphone Remote Volume Slider
         let vol = device.volumeInfo
-        let volMenu = NSMenu()
-        let volIcon =
-          (vol.current == 0)
-          ? "speaker.slash.fill"
-          : (vol.current <= 5
-            ? "speaker.wave.1.fill"
-            : (vol.current <= 11 ? "speaker.wave.2.fill" : "speaker.wave.3.fill"))
-        let volParent = NSMenuItem(
-          title: "Headphone Volume · \(vol.percentage)%", action: nil, keyEquivalent: "")
-        volParent.image = symbol(volIcon)
-        volParent.submenu = volMenu
-
-        volMenu.addItem(
+        menu.addItem(
           createVolumeSliderItem(current: Int(vol.current), max: Int(vol.max), delegate: delegate))
-        volMenu.addItem(.separator())
-
-        let vUp = NSMenuItem(
-          title: "Volume Up", action: #selector(AppDelegate.volumeUp), keyEquivalent: "")
-        vUp.target = delegate
-        vUp.image = symbol("plus")
-        volMenu.addItem(vUp)
-
-        let vDown = NSMenuItem(
-          title: "Volume Down", action: #selector(AppDelegate.volumeDown), keyEquivalent: "")
-        vDown.target = delegate
-        vDown.image = symbol("minus")
-        volMenu.addItem(vDown)
-
-        volMenu.addItem(.separator())
-        volMenu.addItem(sectionHeader("Presets"))
-
-        for (pct, step) in [("100%", 16), ("75%", 12), ("50%", 8), ("25%", 4), ("Mute (0%)", 0)] {
-          let pItem = NSMenuItem(
-            title: pct, action: #selector(AppDelegate.setVolumeClicked(_:)), keyEquivalent: "")
-          pItem.target = delegate
-          pItem.tag = step
-          pItem.state = (vol.current == step) ? .on : .off
-          volMenu.addItem(pItem)
-        }
-
-        menu.addItem(volParent)
       }
 
       // 5. Device Hardware Settings
@@ -497,34 +458,38 @@ public enum MenuBuilder {
     current: Int, max: Int, delegate: AppDelegate?
   ) -> NSMenuItem {
     let item = NSMenuItem()
-    let view = NSView(frame: NSRect(x: 0, y: 0, width: 220, height: 32))
+    let view = NSView(frame: NSRect(x: 0, y: 0, width: 230, height: 32))
+    view.autoresizingMask = [.width]
 
     let iconName =
       (current == 0)
       ? "speaker.slash.fill" : (current <= 8 ? "speaker.wave.1.fill" : "speaker.wave.3.fill")
     let iconImg = NSImage(systemSymbolName: iconName, accessibilityDescription: nil)
     iconImg?.isTemplate = true
-    let iconView = NSImageView(frame: NSRect(x: 12, y: 8, width: 16, height: 16))
+    let iconView = NSImageView(frame: NSRect(x: 14, y: 8, width: 16, height: 16))
     iconView.image = iconImg
     iconView.contentTintColor = .secondaryLabelColor
+    iconView.tag = 98
     view.addSubview(iconView)
 
     let maxVal = max > 0 ? max : 16
     let pct = Int(round((Double(current) / Double(maxVal)) * 100.0))
     let label = NSTextField(labelWithString: "\(pct)%")
-    label.frame = NSRect(x: 172, y: 8, width: 36, height: 16)
+    label.frame = NSRect(x: 180, y: 8, width: 36, height: 16)
     label.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
     label.textColor = .secondaryLabelColor
     label.alignment = .right
+    label.autoresizingMask = [.minXMargin]
     label.tag = 99
     view.addSubview(label)
 
     let slider = NSSlider(
       value: Double(current), minValue: 0, maxValue: Double(maxVal), target: delegate,
       action: #selector(AppDelegate.volumeSliderChanged(_:)))
-    slider.frame = NSRect(x: 34, y: 6, width: 134, height: 20)
+    slider.frame = NSRect(x: 36, y: 6, width: 138, height: 20)
     slider.controlSize = .small
     slider.isContinuous = true
+    slider.autoresizingMask = [.width]
     view.addSubview(slider)
 
     item.view = view

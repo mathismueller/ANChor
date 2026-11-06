@@ -192,12 +192,20 @@ public class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
   @objc public func volumeSliderChanged(_ sender: NSSlider) {
     let level = UInt8(clamping: Int(round(sender.doubleValue)))
-    if let container = sender.superview,
-      let label = container.viewWithTag(99) as? NSTextField
-    {
+    if let container = sender.superview {
       let maxVal = Double(bose.volumeInfo.max > 0 ? bose.volumeInfo.max : 16)
       let pct = Int(round((sender.doubleValue / maxVal) * 100.0))
-      label.stringValue = "\(pct)%"
+      if let label = container.viewWithTag(99) as? NSTextField {
+        label.stringValue = "\(pct)%"
+      }
+      if let iconView = container.viewWithTag(98) as? NSImageView {
+        let iconName =
+          (level == 0)
+          ? "speaker.slash.fill" : (level <= 8 ? "speaker.wave.1.fill" : "speaker.wave.3.fill")
+        let img = NSImage(systemSymbolName: iconName, accessibilityDescription: nil)
+        img?.isTemplate = true
+        iconView.image = img
+      }
     }
     if level != bose.volumeInfo.current {
       bose.log("UI: volumeSliderChanged → \(level)")
