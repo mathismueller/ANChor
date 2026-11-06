@@ -16,7 +16,7 @@ public enum NoiseMode: UInt8, CaseIterable, Sendable {
   /// SF Symbol for menus and status bar
   public var symbolName: String {
     switch self {
-    case .quiet: return "speaker.slash.fill"
+    case .quiet: return "waveform.slash"
     case .aware: return "ear"
     }
   }

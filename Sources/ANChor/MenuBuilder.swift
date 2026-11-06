@@ -271,8 +271,7 @@ public enum MenuBuilder {
         menu.addItem(sectionHeader("Playback"))
         let localPlay = NSMenuItem(
           title: "Play / Pause (Mac)", action: #selector(AppDelegate.toggleLocalPlayback),
-          keyEquivalent: " ")
-        localPlay.keyEquivalentModifierMask = [.command, .shift]
+          keyEquivalent: "")
         localPlay.target = delegate
         localPlay.image = symbol("playpause")
         menu.addItem(localPlay)
@@ -309,15 +308,13 @@ public enum MenuBuilder {
         volParent.submenu = volMenu
 
         let vUp = NSMenuItem(
-          title: "Volume Up", action: #selector(AppDelegate.volumeUp), keyEquivalent: "=")
-        vUp.keyEquivalentModifierMask = [.command]
+          title: "Volume Up", action: #selector(AppDelegate.volumeUp), keyEquivalent: "")
         vUp.target = delegate
         vUp.image = symbol("plus")
         volMenu.addItem(vUp)
 
         let vDown = NSMenuItem(
-          title: "Volume Down", action: #selector(AppDelegate.volumeDown), keyEquivalent: "-")
-        vDown.keyEquivalentModifierMask = [.command]
+          title: "Volume Down", action: #selector(AppDelegate.volumeDown), keyEquivalent: "")
         vDown.target = delegate
         vDown.image = symbol("minus")
         volMenu.addItem(vDown)

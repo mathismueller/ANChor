@@ -37,6 +37,8 @@ final class BoseKitTests: XCTestCase {
     XCTAssertEqual(NoiseMode.aware.rawValue, 1)
     XCTAssertEqual(NoiseMode.quiet.label, "Quiet")
     XCTAssertEqual(NoiseMode.aware.label, "Aware")
+    XCTAssertEqual(NoiseMode.quiet.symbolName, "waveform.slash")
+    XCTAssertEqual(NoiseMode.aware.symbolName, "ear")
   }
 
   func testCncFavoritesDefault() {
