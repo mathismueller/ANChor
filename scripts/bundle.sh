@@ -10,6 +10,15 @@ mkdir -p "$APP/Contents/MacOS"
 mkdir -p "$APP/Contents/Resources"
 cp .build/release/ANChor "$APP/Contents/MacOS/ANChor"
 
+# Compile icon if master exists and icns doesn't
+if [ -f "Resources/AppIconMaster.png" ] && [ ! -f "Resources/AppIcon.icns" ]; then
+    ./scripts/make_icns.sh
+fi
+
+if [ -f "Resources/AppIcon.icns" ]; then
+    cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+fi
+
 cat > "$APP/Contents/Info.plist" << 'XML'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -17,6 +26,10 @@ cat > "$APP/Contents/Info.plist" << 'XML'
 <dict>
     <key>CFBundleExecutable</key>
     <string>ANChor</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIconName</key>
+    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>com.anchor.app</string>
     <key>CFBundleName</key>
