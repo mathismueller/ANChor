@@ -43,7 +43,7 @@ The menu bar shows a headphone icon with battery percentage and current mode ind
 
 ### Download a release (recommended)
 
-1. Grab the latest `ANChor-vX.Y.Z.zip` from the [Releases page](https://github.com/JimmyCalhoun/ANChor/releases).
+1. Grab the latest `ANChor-vX.Y.Z.zip` from the [Releases page](https://github.com/mathismueller/ANChor/releases).
 2. Unzip and move `ANChor.app` to `/Applications`.
 3. **First launch:** right-click `ANChor.app` → **Open** → confirm. macOS Gatekeeper shows a warning the first time because the build is ad-hoc signed (not notarized through the Apple Developer Program). After the first launch it opens normally.
 
@@ -56,7 +56,7 @@ xattr -d com.apple.quarantine /Applications/ANChor.app
 ### Build from source
 
 ```bash
-git clone https://github.com/JimmyCalhoun/ANChor.git
+git clone https://github.com/mathismueller/ANChor.git
 cd ANChor
 swift build -c release
 ```
