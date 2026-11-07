@@ -19,6 +19,16 @@ final class ANChorTests: XCTestCase {
     let titles = menu.items.map { $0.title }
     XCTAssertTrue(titles.contains("Not connected"))
     XCTAssertTrue(titles.contains("Reconnect"))
+    XCTAssertTrue(titles.contains("Start at Login"))
+
+    let loginItem = menu.items.first(where: { $0.title == "Start at Login" })
+    XCTAssertNotNil(loginItem)
+    XCTAssertEqual(loginItem?.action, #selector(AppDelegate.toggleStartAtLogin))
+    XCTAssertEqual(loginItem?.state, .off)
+
+    let menuEnabled = MenuBuilder.buildMenu(device: device, delegate: nil, startAtLogin: true)
+    let loginItemEnabled = menuEnabled.items.first(where: { $0.title == "Start at Login" })
+    XCTAssertEqual(loginItemEnabled?.state, .on)
 
     // Must have standard quit item
     let quitItem = menu.items.first(where: { $0.title == "Quit ANChor" })

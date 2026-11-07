@@ -14,6 +14,8 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
   private let ready = DispatchSemaphore(value: 0)
   private var reconnectTimer: Timer?
   private var pollTimer: Timer?
+  private var connectNotification: IOBluetoothUserNotification?
+  private var isConnecting = false
 
   // MARK: - Public State
 
@@ -48,6 +50,29 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
   public override init() {
     super.init()
     startBTThread()
+    registerForConnectNotifications()
+  }
+
+  deinit {
+    connectNotification?.unregister()
+  }
+
+  private func registerForConnectNotifications() {
+    connectNotification = IOBluetoothDevice.register(
+      forConnectNotifications: self,
+      selector: #selector(handleDeviceConnectedNotification(_:from:))
+    )
+  }
+
+  @objc private func handleDeviceConnectedNotification(
+    _ notification: IOBluetoothUserNotification!, from device: IOBluetoothDevice!
+  ) {
+    guard let dev = device else { return }
+    let name = dev.name ?? "unknown"
+    AppLog.bluetooth.debug("Bluetooth device connected event from: \(name, privacy: .public)")
+    if !isConnected && channel == nil && !isConnecting {
+      connectAsync()
+    }
   }
 
   public func log(_ msg: String, level: OSLogType = .info) {
@@ -72,6 +97,10 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
   }
 
   @objc private func doConnect() {
+    guard channel == nil, !isConnected, !isConnecting else { return }
+    isConnecting = true
+    defer { isConnecting = false }
+
     guard
       let discovered = BoseDiscovery.findDevice(log: { [weak self] in self?.log($0, level: .debug) }
       )

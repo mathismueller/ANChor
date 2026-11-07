@@ -1,5 +1,6 @@
 import BoseKit
 import Cocoa
+import ServiceManagement
 import os
 
 @MainActor
@@ -22,6 +23,35 @@ public class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     get { defaults.bool(forKey: kShowMode) }
     set {
       defaults.set(newValue, forKey: kShowMode)
+      updateUI()
+    }
+  }
+
+  public var startAtLogin: Bool {
+    get {
+      if #available(macOS 13.0, *) {
+        return SMAppService.mainApp.status == .enabled
+      }
+      return defaults.bool(forKey: "startAtLogin")
+    }
+    set {
+      if #available(macOS 13.0, *) {
+        do {
+          if newValue {
+            if SMAppService.mainApp.status != .enabled {
+              try SMAppService.mainApp.register()
+            }
+          } else {
+            if SMAppService.mainApp.status == .enabled {
+              try SMAppService.mainApp.unregister()
+            }
+          }
+        } catch {
+          AppLog.ui.error(
+            "Failed to toggle Start at Login: \(error.localizedDescription, privacy: .public)")
+        }
+      }
+      defaults.set(newValue, forKey: "startAtLogin")
       updateUI()
     }
   }
@@ -80,7 +110,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       device: bose,
       delegate: self,
       showBatteryInBar: showBatteryInBar,
-      showModeInBar: showModeInBar
+      showModeInBar: showModeInBar,
+      startAtLogin: startAtLogin
     )
   }
 
@@ -267,6 +298,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     AppLog.ui.info("reconnect requested")
     bose.disconnect()
     bose.connectAsync()
+  }
+
+  @objc public func toggleStartAtLogin() {
+    startAtLogin = !startAtLogin
+    AppLog.ui.info("toggleStartAtLogin → \(self.startAtLogin)")
   }
 
   @objc public func toggleBattery() {

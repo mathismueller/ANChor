@@ -7,7 +7,8 @@ public enum MenuBuilder {
     device: BoseDevice,
     delegate: AppDelegate? = nil,
     showBatteryInBar: Bool = true,
-    showModeInBar: Bool = true
+    showModeInBar: Bool = true,
+    startAtLogin: Bool = false
   ) -> NSMenu {
     let menu = NSMenu()
     menu.delegate = delegate
@@ -304,8 +305,14 @@ public enum MenuBuilder {
       menu.addItem(shortcutItem)
     }
 
-    // 6. Menu Bar Display Settings
-    menu.addItem(sectionHeader("Menu Bar"))
+    // 6. Preferences & Settings
+    menu.addItem(sectionHeader("Preferences"))
+
+    let loginToggle = NSMenuItem(
+      title: "Start at Login", action: #selector(AppDelegate.toggleStartAtLogin), keyEquivalent: "")
+    loginToggle.target = delegate
+    loginToggle.state = startAtLogin ? .on : .off
+    menu.addItem(loginToggle)
 
     let battToggle = NSMenuItem(
       title: "Show Battery", action: #selector(AppDelegate.toggleBattery), keyEquivalent: "")
