@@ -204,28 +204,6 @@ public class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     bose.setCncFavorites(preset0: fav.preset0, preset1: fav.preset1, preset2: fav.preset2)
   }
 
-  @objc public func toggleLocalPlayback() {
-    AppLog.ui.info("toggleLocalPlayback")
-    func postMediaKey(down: Bool) {
-      let flags: NSEvent.ModifierFlags = down ? .init(rawValue: 0xa00) : .init(rawValue: 0xb00)
-      let data1 = (Int(NX_KEYTYPE_PLAY) << 16) | (down ? 0xa00 : 0xb00)
-      let ev = NSEvent.otherEvent(
-        with: .systemDefined,
-        location: .zero,
-        modifierFlags: flags,
-        timestamp: ProcessInfo.processInfo.systemUptime,
-        windowNumber: 0,
-        context: nil,
-        subtype: 8,
-        data1: data1,
-        data2: -1
-      )
-      ev?.cgEvent?.post(tap: .cghidEventTap)
-    }
-    postMediaKey(down: true)
-    postMediaKey(down: false)
-  }
-
   @objc public func toggleRemotePlayback() {
     AppLog.ui.info("toggleRemotePlayback")
     bose.toggleRemotePlayback()

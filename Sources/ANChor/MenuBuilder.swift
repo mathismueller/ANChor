@@ -232,13 +232,8 @@ public enum MenuBuilder {
 
       // Media Playback Controls
       menu.addItem(sectionHeader("Playback"))
-      let localPlay = NSMenuItem(
-        title: "Play / Pause (Mac)", action: #selector(AppDelegate.toggleLocalPlayback),
-        keyEquivalent: "")
-      localPlay.target = delegate
-      localPlay.image = symbol("playpause")
-      menu.addItem(localPlay)
 
+      // Remote Play / Pause for Second Device
       if let second = device.secondDevice, second.isConnected {
         let remoteTitle = "Play / Pause (\(second.name))"
         let remotePlay = NSMenuItem(
@@ -246,13 +241,6 @@ public enum MenuBuilder {
           keyEquivalent: "")
         remotePlay.target = delegate
         remotePlay.image = symbol("iphone")
-        menu.addItem(remotePlay)
-      } else {
-        let remotePlay = NSMenuItem(
-          title: "Play / Pause (Headphones)", action: #selector(AppDelegate.toggleRemotePlayback),
-          keyEquivalent: "")
-        remotePlay.target = delegate
-        remotePlay.image = symbol("headphones")
         menu.addItem(remotePlay)
       }
 
