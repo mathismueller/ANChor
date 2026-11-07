@@ -1,6 +1,6 @@
 # ANChor ⚓
 
-A lightweight macOS menu bar app for controlling Bose QuietComfort Ultra Earbuds noise cancellation modes.
+A lightweight macOS menu bar app for controlling Bose headphones and earbuds (Bose Noise Cancelling Headphones 700, QuietComfort series, and more) noise cancellation modes and audio settings.
 
 ![macOS](https://img.shields.io/badge/macOS-13%2B-blue)
 ![Swift](https://img.shields.io/badge/Swift-5.9-orange)
@@ -8,10 +8,12 @@ A lightweight macOS menu bar app for controlling Bose QuietComfort Ultra Earbuds
 
 ## Features
 
-- 🎧 **Menu bar integration** — always accessible, no dock icon
-- 🔋 **Battery levels** — left, right, and case percentages shown in menu bar
-- 🔇 **Noise control** — switch between Quiet and Aware modes with one click
-- ⚡ **Instant switching** — direct RFCOMM/BMAP communication, no app relay needed
+- 🎧 **Menu bar integration** — always accessible, lightweight utility with no dock icon
+- 🔋 **Battery levels** — live battery percentage displayed in the menu bar and dropdown
+- 🔇 **Noise control** — switch between Quiet and Aware modes (⌥⌘1 / ⌥⌘2) or adjust noise cancellation levels
+- 🎚️ **Equalizer & Sidetone** — customize Bass, Mid, Treble, and Self Voice levels
+- ⚡ **Instant switching** — direct RFCOMM/BMAP communication, auto-reconnecting on Bluetooth connection
+- 🚀 **Start at Login** — native macOS ServiceManagement integration
 
 ## Screenshot
 
@@ -19,17 +21,25 @@ A lightweight macOS menu bar app for controlling Bose QuietComfort Ultra Earbuds
 
 The menu bar shows a headphone icon with battery percentage and current mode indicator. Clicking it reveals:
 
-- Device name
-- Battery levels (Left / Right / Case)
-- Noise mode toggles (Quiet ✓ / Aware) with ⌥⌘1 / ⌥⌘2 shortcuts
-- Menu bar display preferences and Quit
+- Connected device name and device details
+- Battery percentage (and per-earbud levels where applicable)
+- Listening modes (Quiet / Aware) and continuous noise level slider
+- Left button favorite presets
+- Audio settings (Equalizer, Self Voice / Sidetone)
+- Playback controls (secondary device play/pause, headphone volume)
+- Settings (Voice Prompts, Touch Shortcut)
+- Preferences (Start at Login, Menu Bar display toggles) and Quit
 
 ## Supported Devices
 
 | Device | Codename | Product ID | Status |
 |--------|----------|-----------|--------|
-| QC Ultra Earbuds (2nd Gen) | edith | 0x4062 | ✅ Tested |
+| Noise Cancelling Headphones 700 | goodyear | 0x4024 | ✅ Tested |
+| QC Ultra Earbuds (2nd Gen) | edith | 0x4062 | Should work* |
 | QC Ultra Earbuds (1st Gen) | scotty | 0x4072 | Should work* |
+| QC Ultra Headphones | wolverine | 0x4060 | Should work* |
+| QuietComfort 45 | fuji | 0x403E | Should work* |
+| QC Earbuds | lando | 0x402F | Should work* |
 
 *These devices use the same BMAP protocol. Contributions with test results welcome!
 
@@ -123,15 +133,14 @@ RX: [0x1F, 0x03, 0x06, 0x01, new_mode_idx]  (RESULT = success)
 ## Known Limitations
 
 - **macOS only** — uses IOBluetooth framework (no Linux/Windows support)
-- **RFCOMM channel lockout** — if the app crashes or disconnects uncleanly, you may need to disconnect/reconnect your earbuds via System Settings before the app can reconnect
-- **Single device** — currently supports one hardcoded device address
-- **No CNC slider** — direct CNC level control requires cloud-mediated ECDH auth (Bose restriction)
+- **RFCOMM channel lockout** — if the app crashes or disconnects uncleanly, you may need to disconnect/reconnect your device via System Settings before the app can reconnect
+- **Direct CNC slider** — available on models supporting direct CNC commands (such as NC 700); on devices requiring cloud authentication for arbitrary CNC levels, modes switch between presets (Quiet / Aware)
 
 ## Troubleshooting
 
 **"Connecting..." stays forever**
-- Disconnect earbuds from Bluetooth (System Settings → Bluetooth → Disconnect)
-- Reconnect earbuds
+- Disconnect device from Bluetooth (System Settings → Bluetooth → Disconnect)
+- Reconnect device
 - Click "Reconnect" in the menu or restart the app
 
 **No battery shown**
@@ -145,11 +154,9 @@ RX: [0x1F, 0x03, 0x06, 0x01, new_mode_idx]  (RESULT = success)
 ## Contributing
 
 Contributions welcome! Especially:
-- Testing with other Bose devices (QC45, QC35, NC700, etc.)
-- Auto-discovery of paired Bose devices
-- Keyboard shortcuts / global hotkeys
-- Launch at login support
-- SwiftUI popover UI (instead of NSMenu)
+- Testing with other Bose devices (QC45, QC35, etc.)
+- Additional protocol reverse engineering for newer firmware
+- SwiftUI popover UI (alternative to NSMenu)
 
 ## License
 
