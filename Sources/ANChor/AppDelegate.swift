@@ -7,6 +7,7 @@ import os
 public class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   public var statusItem: NSStatusItem!
   public let bose = BoseDevice.shared
+  private weak var activeMenu: NSMenu?
 
   private let defaults = UserDefaults.standard
   private let kShowBattery = "showBatteryInBar"
@@ -112,13 +113,20 @@ public class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       }
     }
 
-    statusItem.menu = MenuBuilder.buildMenu(
-      device: bose,
-      delegate: self,
-      showBatteryInBar: showBatteryInBar,
-      showModeInBar: showModeInBar,
-      startAtLogin: startAtLogin
-    )
+    if let openMenu = activeMenu ?? statusItem.menu {
+      updateListeningModeItems(in: openMenu, level: bose.cncLevel)
+      updateNoiseSliderItem(in: openMenu, level: bose.cncLevel)
+    }
+
+    if activeMenu == nil {
+      statusItem.menu = MenuBuilder.buildMenu(
+        device: bose,
+        delegate: self,
+        showBatteryInBar: showBatteryInBar,
+        showModeInBar: showModeInBar,
+        startAtLogin: startAtLogin
+      )
+    }
   }
 
   // MARK: - User Actions
@@ -148,6 +156,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         iconView.image = img
       }
     }
+
+    let targetMenu = sender.enclosingMenuItem?.menu ?? activeMenu ?? statusItem.menu
+    if let menu = targetMenu {
+      updateListeningModeItems(in: menu, level: step)
+    }
+
     if step != bose.cncLevel {
       AppLog.ui.debug("cncSliderChanged → \(step)")
       bose.setCNCLevel(step)
@@ -312,9 +326,53 @@ public class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   public func menuWillOpen(_ menu: NSMenu) {
+    activeMenu = menu
     AppLog.ui.debug("menuWillOpen (connected=\(self.bose.isConnected, privacy: .public))")
     if bose.isConnected {
       bose.refreshState()
+    }
+  }
+
+  public func menuDidClose(_ menu: NSMenu) {
+    activeMenu = nil
+    statusItem.menu = MenuBuilder.buildMenu(
+      device: bose,
+      delegate: self,
+      showBatteryInBar: showBatteryInBar,
+      showModeInBar: showModeInBar,
+      startAtLogin: startAtLogin
+    )
+  }
+
+  public func updateListeningModeItems(in menu: NSMenu, level: UInt8) {
+    for item in menu.items {
+      if item.action == #selector(modeClicked(_:)) {
+        if item.tag == Int(NoiseMode.quiet.rawValue) {
+          item.state = (level == 0) ? .on : .off
+        } else if item.tag == Int(NoiseMode.aware.rawValue) {
+          item.state = (level == 10) ? .on : .off
+        }
+      }
+    }
+  }
+
+  public func updateNoiseSliderItem(in menu: NSMenu, level: UInt8) {
+    guard let item = menu.items.first(where: { $0.tag == 777 }), let container = item.view else {
+      return
+    }
+    if let slider = container.viewWithTag(97) as? NSSlider {
+      if UInt8(clamping: Int(round(slider.doubleValue))) != level {
+        slider.doubleValue = Double(level)
+      }
+    }
+    if let label = container.viewWithTag(99) as? NSTextField {
+      label.stringValue = "Level \(level)"
+    }
+    if let iconView = container.viewWithTag(98) as? NSImageView {
+      let iconName = (level <= 5) ? "waveform.slash" : "ear"
+      let img = NSImage(systemSymbolName: iconName, accessibilityDescription: nil)
+      img?.isTemplate = true
+      iconView.image = img
     }
   }
 }

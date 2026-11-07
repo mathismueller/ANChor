@@ -468,6 +468,7 @@ public enum MenuBuilder {
     current: Int, delegate: AppDelegate?
   ) -> NSMenuItem {
     let item = NSMenuItem()
+    item.tag = 777
     let view = NSView(frame: NSRect(x: 0, y: 0, width: 230, height: 32))
     view.autoresizingMask = [.width]
 
@@ -499,6 +500,7 @@ public enum MenuBuilder {
     slider.controlSize = .small
     slider.isContinuous = true
     slider.autoresizingMask = [.width]
+    slider.tag = 97
     view.addSubview(slider)
 
     item.view = view
