@@ -84,4 +84,34 @@ final class ANChorTests: XCTestCase {
     XCTAssertNotNil(label)
     XCTAssertEqual(label?.stringValue, "Level 5")
   }
+
+  func testListeningModeCheckedOnlyAtRespectiveLevels() {
+    let device = BoseDevice()
+    device.setConnectedForTesting(true)
+    device.setDirectCNCForTesting(true)
+
+    // At Level 0: Quiet is ON, Aware is OFF
+    device.setCNCLevel(0)
+    let menu0 = MenuBuilder.buildMenu(device: device, delegate: nil)
+    let quiet0 = menu0.items.first(where: { $0.title == "Quiet" })
+    let aware0 = menu0.items.first(where: { $0.title == "Aware" })
+    XCTAssertEqual(quiet0?.state, .on)
+    XCTAssertEqual(aware0?.state, .off)
+
+    // At Level 10: Quiet is OFF, Aware is ON
+    device.setCNCLevel(10)
+    let menu10 = MenuBuilder.buildMenu(device: device, delegate: nil)
+    let quiet10 = menu10.items.first(where: { $0.title == "Quiet" })
+    let aware10 = menu10.items.first(where: { $0.title == "Aware" })
+    XCTAssertEqual(quiet10?.state, .off)
+    XCTAssertEqual(aware10?.state, .on)
+
+    // At intermediate Level 5: BOTH Quiet and Aware are OFF
+    device.setCNCLevel(5)
+    let menu5 = MenuBuilder.buildMenu(device: device, delegate: nil)
+    let quiet5 = menu5.items.first(where: { $0.title == "Quiet" })
+    let aware5 = menu5.items.first(where: { $0.title == "Aware" })
+    XCTAssertEqual(quiet5?.state, .off)
+    XCTAssertEqual(aware5?.state, .off)
+  }
 }

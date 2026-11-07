@@ -22,7 +22,7 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
   public private(set) var isConnected: Bool = false
   public private(set) var deviceName: String = "Bose Device"
   public private(set) var batteryInfo: BatteryInfo = BatteryInfo()
-  public private(set) var currentMode: NoiseMode = .quiet
+  public private(set) var currentMode: NoiseMode? = .quiet
   public private(set) var cncLevel: UInt8 = 0
   public private(set) var equalizer: EqualizerSettings = EqualizerSettings()
   public private(set) var hasEqualizer: Bool = true
@@ -78,6 +78,16 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
   public func log(_ msg: String, level: OSLogType = .info) {
     AppLog.device.log(level: level, "\(msg, privacy: .public)")
   }
+
+  #if DEBUG
+    public func setDirectCNCForTesting(_ direct: Bool) {
+      usesDirectCNC = direct
+    }
+
+    public func setConnectedForTesting(_ connected: Bool) {
+      isConnected = connected
+    }
+  #endif
 
   private func startBTThread() {
     btThread = Thread { [weak self] in
@@ -247,9 +257,16 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
           let step = resp[5]
           cncLevel = step
           if Date().timeIntervalSince(lastModeChangeTime) >= 1.5 {
-            currentMode = (step <= 5) ? .quiet : .aware
+            if step == 0 {
+              currentMode = .quiet
+            } else if step == 10 {
+              currentMode = .aware
+            } else {
+              currentMode = nil
+            }
           }
-          AppLog.device.debug("CNC step \(step) -> \(self.currentMode.label)")
+          AppLog.device.debug(
+            "CNC step \(step) -> \(self.currentMode?.label ?? "Level \(step)")")
         }
       }
     } else {
@@ -528,7 +545,13 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
   public func setCNCLevel(_ step: UInt8) {
     let clamped = max(0, min(10, step))
     cncLevel = clamped
-    currentMode = (clamped <= 5) ? .quiet : .aware
+    if clamped == 0 {
+      currentMode = .quiet
+    } else if clamped == 10 {
+      currentMode = .aware
+    } else {
+      currentMode = nil
+    }
     lastModeChangeTime = Date()
     DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
 
@@ -663,7 +686,13 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
     cncFavorites.activeIndex = Int(idx)
     let targetLevel = idx == 0 ? p0 : (idx == 1 ? p1 : p2)
     cncLevel = targetLevel
-    currentMode = (targetLevel <= 5) ? .quiet : .aware
+    if targetLevel == 0 {
+      currentMode = .quiet
+    } else if targetLevel == 10 {
+      currentMode = .aware
+    } else {
+      currentMode = nil
+    }
     lastModeChangeTime = Date()
     DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
     perform(
@@ -803,11 +832,18 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
       let stepChanged = (step != cncLevel)
       cncLevel = step
       if Date().timeIntervalSince(lastModeChangeTime) >= 1.5 {
-        let mode: NoiseMode = (step <= 5) ? .quiet : .aware
-        if stepChanged || mode != currentMode {
+        let newMode: NoiseMode?
+        if step == 0 {
+          newMode = .quiet
+        } else if step == 10 {
+          newMode = .aware
+        } else {
+          newMode = nil
+        }
+        if stepChanged || newMode != currentMode {
           AppLog.device.info(
-            "📡 CNC change: step \(step) -> \(mode.label, privacy: .public)")
-          currentMode = mode
+            "📡 CNC change: step \(step) -> \(newMode?.label ?? "Level \(step)", privacy: .public)")
+          currentMode = newMode
           DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
         }
       }

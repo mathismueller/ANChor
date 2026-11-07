@@ -101,7 +101,19 @@ public enum MenuBuilder {
         item.keyEquivalentModifierMask = [.command, .option]
         item.target = delegate
         item.tag = Int(mode.rawValue)
-        item.state = mode == device.currentMode ? .on : .off
+        let isChecked: Bool
+        if device.usesDirectCNC {
+          if mode == .quiet {
+            isChecked = (device.cncLevel == 0)
+          } else if mode == .aware {
+            isChecked = (device.cncLevel == 10)
+          } else {
+            isChecked = false
+          }
+        } else {
+          isChecked = (mode == device.currentMode)
+        }
+        item.state = isChecked ? .on : .off
         item.image = symbol(mode.symbolName)
         menu.addItem(item)
       }

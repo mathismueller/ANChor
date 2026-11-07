@@ -78,11 +78,17 @@ public class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       name = "headphones.slash"
       accessibility = "ANChor — not connected"
     } else if showModeInBar {
-      name = bose.currentMode.symbolName
-      accessibility = "ANChor — \(bose.currentMode.label)"
+      if let mode = bose.currentMode {
+        name = mode.symbolName
+        accessibility = "ANChor — \(mode.label)"
+      } else {
+        name = (bose.cncLevel <= 5) ? "waveform.slash" : "ear"
+        accessibility = "ANChor — Level \(bose.cncLevel)"
+      }
     } else {
       name = "headphones"
-      accessibility = "ANChor — \(bose.currentMode.label)"
+      let modeLabel = bose.currentMode?.label ?? "Level \(bose.cncLevel)"
+      accessibility = "ANChor — \(modeLabel)"
     }
     let img = NSImage(systemSymbolName: name, accessibilityDescription: accessibility)
     img?.isTemplate = true
