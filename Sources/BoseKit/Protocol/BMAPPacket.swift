@@ -50,6 +50,8 @@ public enum BMAPFunctionBlock {
   public static let battery: UInt8 = 2
   public static let deviceManagement: UInt8 = 4
   public static let audioManagement: UInt8 = 5
+  public static let notification: UInt8 = 9
+  public static let authentication: UInt8 = 18
   public static let audioModes: UInt8 = 31  // 0x1F
 }
 
@@ -57,12 +59,15 @@ public enum BMAPFunction {
   // Block 0: DeviceInfo
   public static let protocolVersion: UInt8 = 1
   public static let deviceVariant: UInt8 = 2
+  public static let productGuid: UInt8 = 12
   public static let firmwareVersion: UInt8 = 5
   public static let serialNumber: UInt8 = 7
 
   // Block 1: Settings
   public static let productName: UInt8 = 2
   public static let voicePrompts: UInt8 = 3
+  public static let standbyTimer: UInt8 = 4
+  public static let motionAutoOff: UInt8 = 20
   public static let cnc: UInt8 = 5
   public static let equalizer: UInt8 = 7
   public static let buttons: UInt8 = 9
@@ -76,6 +81,7 @@ public enum BMAPFunction {
   public static let batteryState: UInt8 = 3
 
   // Block 4: DeviceManagement
+  public static let connectDevice: UInt8 = 1
   public static let listDevices: UInt8 = 4
   public static let peerDeviceInfo: UInt8 = 5
   public static let localMacAddress: UInt8 = 9
@@ -85,9 +91,40 @@ public enum BMAPFunction {
   public static let audioControl: UInt8 = 3
   public static let volume: UInt8 = 5
 
+  // Block 9: Notification
+  public static let notificationsByFblock: UInt8 = 2
+
+  // Block 18: Authentication (read-only identification)
+  public static let authCodename: UInt8 = 12
+  public static let authPlatform: UInt8 = 13
+
   // Block 31 (0x1F): AudioModes
   public static let allModes: UInt8 = 1
   public static let currentMode: UInt8 = 3
+}
+
+/// Builds a DeviceManagement Connect [4.1] START payload: leading 0x00 + 6 MAC bytes.
+/// Returns nil for malformed MAC strings. Format: "aa:bb:cc:dd:ee:ff".
+public func buildConnectPayload(mac: String) -> [UInt8]? {
+  let parts = mac.split(separator: ":")
+  guard parts.count == 6 else { return nil }
+  var bytes: [UInt8] = [0x00]
+  for p in parts {
+    guard let b = UInt8(p, radix: 16) else { return nil }
+    bytes.append(b)
+  }
+  return bytes
+}
+
+/// Formats a 16-byte product GUID as 8-4-4-4-12 lowercase hex.
+public func formatGuid(_ bytes: [UInt8]) -> String? {
+  guard bytes.count == 16 else { return nil }
+  let h = bytes.map { String(format: "%02x", $0) }.joined()
+  let parts = [
+    h.prefix(8), h.dropFirst(8).prefix(4), h.dropFirst(12).prefix(4),
+    h.dropFirst(16).prefix(4), h.dropFirst(20),
+  ]
+  return parts.joined(separator: "-")
 }
 
 /// Helper function to construct wire packet bytes directly

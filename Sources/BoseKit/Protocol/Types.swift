@@ -2,6 +2,12 @@ import Foundation
 
 // MARK: - Noise Modes
 
+// Wire scale is inverted vs Bose convention: raw 0 = max ANC (Quiet),
+// raw 10 = transparent (Aware). Voice prompts and the Bose app count
+// 10 = max ANC. Convert at the UI boundary; the wire stays raw.
+public func cncDisplayLevel(raw: UInt8) -> Int { 10 - Int(raw) }
+public func cncRawLevel(displayed: Int) -> UInt8 { UInt8(clamping: 10 - displayed) }
+
 public enum NoiseMode: UInt8, CaseIterable, Sendable {
   case quiet = 0
   case aware = 1
@@ -153,19 +159,34 @@ public struct DeviceMetadata: Equatable, Sendable {
   public var serialNumber: String?
   public var modelName: String?
   public var productID: UInt16?
+  public var deviceName: String?
+  public var reportedCodename: String?
+  public var platformName: String?
+  public var standbyTimer: UInt8?
+  public var productGuid: String?
 
   public init(
     firmwareVersion: String? = nil,
     protocolVersion: String? = nil,
     serialNumber: String? = nil,
     modelName: String? = nil,
-    productID: UInt16? = nil
+    productID: UInt16? = nil,
+    deviceName: String? = nil,
+    reportedCodename: String? = nil,
+    platformName: String? = nil,
+    standbyTimer: UInt8? = nil,
+    productGuid: String? = nil
   ) {
     self.firmwareVersion = firmwareVersion
     self.protocolVersion = protocolVersion
     self.serialNumber = serialNumber
     self.modelName = modelName
     self.productID = productID
+    self.deviceName = deviceName
+    self.reportedCodename = reportedCodename
+    self.platformName = platformName
+    self.standbyTimer = standbyTimer
+    self.productGuid = productGuid
   }
 }
 

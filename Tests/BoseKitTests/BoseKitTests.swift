@@ -105,6 +105,114 @@ final class BoseKitTests: XCTestCase {
     XCTAssertEqual(ShortcutAction.wakeWord.label, "Enable/Disable Wake Word")
   }
 
+  // MARK: - Notifications & Informative Blocks
+
+  func testNotificationsEnablePacket() {
+    let pkt = makeBMAPPacket(
+      fblock: BMAPFunctionBlock.notification, funcID: BMAPFunction.notificationsByFblock,
+      op: BMAPOperator.setGet.rawValue, payload: [0x01, 0x00, 0x05, 0x02, 0x37])
+    XCTAssertEqual(pkt, [0x09, 0x02, 0x02, 0x05, 0x01, 0x00, 0x05, 0x02, 0x37])
+  }
+
+  func testNewFunctionConstants() {
+    XCTAssertEqual(BMAPFunctionBlock.notification, 9)
+    XCTAssertEqual(BMAPFunctionBlock.authentication, 18)
+    XCTAssertEqual(BMAPFunction.standbyTimer, 4)
+    XCTAssertEqual(BMAPFunction.notificationsByFblock, 2)
+    XCTAssertEqual(BMAPFunction.authCodename, 12)
+    XCTAssertEqual(BMAPFunction.authPlatform, 13)
+  }
+
+  func testProductNamePayloadParsing() {
+    // [1.2] STATUS payload: flag byte + UTF-8 name ("Mathis' Headphones" capture)
+    let payload: [UInt8] = [0x00] + Array("Mathis' Headphones".utf8)
+    let name = String(bytes: Array(payload[1...]), encoding: .utf8)
+    XCTAssertEqual(name, "Mathis' Headphones")
+  }
+
+  func testStandbyTimerSweepValue() {
+    // Sweep capture: [1.4] STATUS 28 = 40 (auto-off minutes)
+    XCTAssertEqual(0x28, 40)
+  }
+
+  func testMetadataNewFieldsDefaultNil() {
+    let meta = DeviceMetadata()
+    XCTAssertNil(meta.deviceName)
+    XCTAssertNil(meta.reportedCodename)
+    XCTAssertNil(meta.platformName)
+    XCTAssertNil(meta.standbyTimer)
+  }
+
+  // MARK: - Paired Device Connect
+
+  func testBuildConnectPayload() {
+    XCTAssertEqual(
+      buildConnectPayload(mac: "64:31:58:02:5e:03"),
+      [0x00, 0x64, 0x31, 0x58, 0x02, 0x5E, 0x03])
+    XCTAssertNil(buildConnectPayload(mac: "not-a-mac"))
+    XCTAssertNil(buildConnectPayload(mac: "64:31:58:02:5e"))
+    XCTAssertNil(buildConnectPayload(mac: "64:31:xx:02:5e:03"))
+  }
+
+  func testConnectPacketBytes() {
+    let payload = buildConnectPayload(mac: "64:31:58:02:5e:03")!
+    let pkt = makeBMAPPacket(
+      fblock: BMAPFunctionBlock.deviceManagement, funcID: BMAPFunction.connectDevice,
+      op: BMAPOperator.start.rawValue, payload: payload)
+    XCTAssertEqual(pkt, [0x04, 0x01, 0x05, 0x07, 0x00, 0x64, 0x31, 0x58, 0x02, 0x5E, 0x03])
+  }
+
+  // MARK: - Standby Timer
+
+  func testStandbyTimerPacketBytes() {
+    let pkt = makeBMAPPacket(
+      fblock: BMAPFunctionBlock.settings, funcID: BMAPFunction.standbyTimer,
+      op: BMAPOperator.setGet.rawValue, payload: [40])
+    XCTAssertEqual(pkt, [0x01, 0x04, 0x02, 0x01, 0x28])
+  }
+
+  // MARK: - Product GUID
+
+  func testFormatGuid() {
+    let bytes: [UInt8] = [
+      0x19, 0x23, 0x1E, 0x38, 0x4F, 0x96, 0x5D, 0xC8,
+      0xE5, 0x99, 0x02, 0xD1, 0xD5, 0xB6, 0x9A, 0xDE,
+    ]
+    XCTAssertEqual(formatGuid(bytes), "19231e38-4f96-5dc8-e599-02d1d5b69ade")
+    XCTAssertNil(formatGuid([0x01, 0x02]))
+  }
+
+  func testProductGuidConstant() {
+    XCTAssertEqual(BMAPFunction.productGuid, 12)
+  }
+
+  // MARK: - Motion Auto-off
+
+  // MARK: - CNC Scale (raw 0 = max ANC, Bose voice/app scale 10 = max ANC)
+
+  func testCncScaleConversion() {
+    XCTAssertEqual(cncDisplayLevel(raw: 0), 10)  // Quiet, voice says "ten"
+    XCTAssertEqual(cncDisplayLevel(raw: 10), 0)  // Aware, voice says "zero"
+    XCTAssertEqual(cncDisplayLevel(raw: 3), 7)
+    XCTAssertEqual(cncRawLevel(displayed: 10), 0)
+    XCTAssertEqual(cncRawLevel(displayed: 0), 10)
+    XCTAssertEqual(cncRawLevel(displayed: 7), 3)
+    // round-trip
+    for raw: UInt8 in 0...10 {
+      XCTAssertEqual(cncRawLevel(displayed: cncDisplayLevel(raw: raw)), raw)
+    }
+  }
+  func testMotionAutoOffConstant() {
+    XCTAssertEqual(BMAPFunction.motionAutoOff, 20)
+  }
+
+  func testMotionAutoOffGetPacket() {
+    let pkt = makeBMAPPacket(
+      fblock: BMAPFunctionBlock.settings, funcID: BMAPFunction.motionAutoOff,
+      op: BMAPOperator.get.rawValue)
+    XCTAssertEqual(pkt, [0x01, 0x14, 0x01, 0x00])
+  }
+
   // MARK: - Device Catalog Tests
 
   func testCatalogProfiles() {

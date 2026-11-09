@@ -34,6 +34,22 @@ public enum MenuBuilder {
       let pidStr = meta.productID != nil ? String(format: "0x%04X", meta.productID!) : ""
       addInfoRow(to: detailsMenu, title: "Model: \(modelName) \(pidStr)")
 
+      if let name = meta.deviceName {
+        addInfoRow(to: detailsMenu, title: "Name: \(name)")
+      }
+      if let codename = meta.reportedCodename {
+        let plat =
+          meta.platformName != nil ? " / \(meta.platformName!)" : ""
+        addInfoRow(to: detailsMenu, title: "Codename: \(codename)\(plat)")
+      } else if let plat = meta.platformName {
+        addInfoRow(to: detailsMenu, title: "Platform: \(plat)")
+      }
+      if let standby = meta.standbyTimer {
+        addInfoRow(
+          to: detailsMenu,
+          title: standby == 0 ? "Auto-off timer: Never" : "Auto-off timer: \(standby) min")
+      }
+
       if let fw = meta.firmwareVersion {
         addInfoRow(to: detailsMenu, title: "Firmware: \(fw)")
       }
@@ -42,6 +58,11 @@ public enum MenuBuilder {
       }
       if let serial = meta.serialNumber {
         addInfoRow(to: detailsMenu, title: "Serial: \(serial)")
+      }
+      if let guid = meta.productGuid {
+        addInfoRow(to: detailsMenu, title: "GUID: \(guid)")
+      }
+      if meta.serialNumber != nil {
         detailsMenu.addItem(.separator())
 
         let copySerial = NSMenuItem(
@@ -118,10 +139,11 @@ public enum MenuBuilder {
         menu.addItem(item)
       }
 
-      // Granular CNC Levels (0 to 10) for NC 700
+      // Granular CNC Levels (Bose scale 0 to 10, 10 = max ANC) for NC 700
       if device.usesDirectCNC {
         menu.addItem(
-          createNoiseLevelSliderItem(current: Int(device.cncLevel), delegate: delegate))
+          createNoiseLevelSliderItem(
+            current: cncDisplayLevel(raw: device.cncLevel), delegate: delegate))
       }
 
       // Left Button Favorites (CNC Presets for NC 700)
@@ -132,16 +154,17 @@ public enum MenuBuilder {
       favParent.submenu = favMenu
       favParent.image = symbol("star.fill")
 
-      for (idx, level) in [favs.preset0, favs.preset1, favs.preset2].enumerated() {
+      for (idx, rawLevel) in [favs.preset0, favs.preset1, favs.preset2].enumerated() {
+        let shown = cncDisplayLevel(raw: UInt8(rawLevel))
         let levelLabel: String
-        if level == 0 {
-          levelLabel = "0 (Quiet)"
-        } else if level == 10 {
-          levelLabel = "10 (Aware)"
-        } else if level == 5 {
+        if shown == 10 {
+          levelLabel = "10 (Quiet)"
+        } else if shown == 0 {
+          levelLabel = "0 (Aware)"
+        } else if shown == 5 {
           levelLabel = "5 (Mid)"
         } else {
-          levelLabel = "\(level)"
+          levelLabel = "\(shown)"
         }
 
         let pSub = NSMenu()
@@ -155,25 +178,26 @@ public enum MenuBuilder {
         pItem.state = (favs.activeIndex == idx) ? .on : .off
         pItem.submenu = pSub
 
-        // Submenu to configure level for this preset
+        // Submenu to configure level for this preset (Bose scale, 10 at top)
         pSub.addItem(sectionHeader("Configure Level"))
-        for lvl in 0...10 {
+        for shown in stride(from: 10, through: 0, by: -1) {
+          let raw = cncRawLevel(displayed: shown)
           let desc: String
-          if lvl == 0 {
-            desc = "Level 0 (Quiet — Max ANC)"
-          } else if lvl == 5 {
+          if shown == 10 {
+            desc = "Level 10 (Quiet — Max ANC)"
+          } else if shown == 5 {
             desc = "Level 5 (Mid)"
-          } else if lvl == 10 {
-            desc = "Level 10 (Aware — Transparency)"
+          } else if shown == 0 {
+            desc = "Level 0 (Aware — Transparency)"
           } else {
-            desc = "Level \(lvl)"
+            desc = "Level \(shown)"
           }
 
           let setLvlItem = NSMenuItem(
             title: desc, action: #selector(AppDelegate.setCncPresetLevel(_:)), keyEquivalent: "")
           setLvlItem.target = delegate
-          setLvlItem.tag = (idx * 100) + lvl
-          setLvlItem.state = (level == lvl) ? .on : .off
+          setLvlItem.tag = (idx * 100) + Int(raw)
+          setLvlItem.state = (rawLevel == Int(raw)) ? .on : .off
           pSub.addItem(setLvlItem)
         }
 
@@ -272,6 +296,83 @@ public enum MenuBuilder {
       voiceItem.image = symbol("bubble.left")
       menu.addItem(voiceItem)
 
+      // Auto-off timer [1.4] (minutes; 0 = Never, verified on hardware)
+      let standbyMenu = NSMenu()
+      let standbyItem = NSMenuItem(title: "Auto-off Timer", action: nil, keyEquivalent: "")
+      standbyItem.image = symbol("timer")
+      standbyItem.submenu = standbyMenu
+
+      let standbyOptions: [(UInt8, String)] = [
+        (0, "Never"), (5, "5 minutes"), (20, "20 minutes"), (40, "40 minutes"),
+        (60, "1 hour"), (180, "3 hours"),
+      ]
+      for (mins, label) in standbyOptions {
+        let item = NSMenuItem(
+          title: label, action: #selector(AppDelegate.standbyTimerClicked(_:)),
+          keyEquivalent: "")
+        item.target = delegate
+        item.tag = Int(mins)
+        item.state = device.metadata.standbyTimer == mins ? .on : .off
+        standbyMenu.addItem(item)
+      }
+      menu.addItem(standbyItem)
+
+      // Motion Auto-off [1.20] (read-only: toggled in the Bose app)
+      let motionItem = NSMenuItem(
+        title: "Motion Auto-off: \(device.motionAutoOffEnabled ? "On" : "Off")",
+        action: nil, keyEquivalent: "")
+      motionItem.isEnabled = false
+      motionItem.image = symbol("figure.walk")
+      motionItem.tag = 783
+      menu.addItem(motionItem)
+
+      // Paired Devices (tap a disconnected one to switch to it)
+      if !device.pairedDevices.isEmpty {
+        let pairedMenu = NSMenu()
+        let pairedItem = NSMenuItem(
+          title: "Paired Devices (\(device.pairedDevices.count))", action: nil, keyEquivalent: "")
+        pairedItem.image = symbol("bluetooth")
+        pairedItem.submenu = pairedMenu
+
+        for dev in device.pairedDevices {
+          let title: String
+          if dev.isLocalHost {
+            let badge = dev.isActiveAudioSource ? " ✓" : ""
+            title = "\(dev.name) (this Mac)\(badge)"
+          } else if dev.isConnected {
+            let badge = dev.isActiveAudioSource ? " ✓" : ""
+            title = "\(dev.name)\(badge)"
+          } else if dev.name == "Bluetooth Device" {
+            // Unresolved (e.g. [4.5] refused while disconnected): show short
+            // MAC so multiple generics are distinguishable.
+            let shortMac = dev.macAddress.split(separator: ":").suffix(2).joined(separator: ":")
+            title = "Bluetooth Device (…\(shortMac)) — connect"
+          } else {
+            title = "\(dev.name) — connect"
+          }
+          let item = NSMenuItem(
+            title: title,
+            action: dev.isConnected ? nil : #selector(AppDelegate.connectPairedDeviceClicked(_:)),
+            keyEquivalent: "")
+          item.target = delegate
+          item.representedObject = dev.macAddress
+          item.state = dev.isConnected ? .on : .off
+          pairedMenu.addItem(item)
+        }
+        menu.addItem(pairedItem)
+      }
+
+      // Audio Source (Multipoint): local Mac vs second device
+      if let local = device.localDevice {
+        let badge = local.isActiveAudioSource ? " (Active Audio)" : ""
+        let localItem = NSMenuItem(
+          title: "This Mac: \(local.name)\(badge)", action: nil, keyEquivalent: "")
+        localItem.isEnabled = false
+        localItem.image = symbol("laptopcomputer")
+        localItem.tag = 781
+        localItem.state = local.isActiveAudioSource ? .on : .off
+        menu.addItem(localItem)
+      }
       // Second Connected Bluetooth Device (Multipoint)
       if let second = device.secondDevice, second.isConnected {
         let badge = second.isActiveAudioSource ? " (Active Audio)" : ""
@@ -279,11 +380,14 @@ public enum MenuBuilder {
         let secItem = NSMenuItem(title: devTitle, action: nil, keyEquivalent: "")
         secItem.isEnabled = false
         secItem.image = symbol("iphone")
+        secItem.tag = 782
+        secItem.state = second.isActiveAudioSource ? .on : .off
         menu.addItem(secItem)
       } else {
         let secItem = NSMenuItem(title: "Second Device: None", action: nil, keyEquivalent: "")
         secItem.isEnabled = false
         secItem.image = symbol("iphone.slash")
+        secItem.tag = 782
         menu.addItem(secItem)
       }
 
@@ -426,6 +530,7 @@ public enum MenuBuilder {
     current: Int, max: Int, delegate: AppDelegate?
   ) -> NSMenuItem {
     let item = NSMenuItem()
+    item.tag = 778
     let view = NSView(frame: NSRect(x: 0, y: 0, width: 230, height: 32))
     view.autoresizingMask = [.width]
 
@@ -458,6 +563,7 @@ public enum MenuBuilder {
     slider.controlSize = .small
     slider.isContinuous = true
     slider.autoresizingMask = [.width]
+    slider.tag = 96
     view.addSubview(slider)
 
     item.view = view
@@ -472,7 +578,7 @@ public enum MenuBuilder {
     let view = NSView(frame: NSRect(x: 0, y: 0, width: 230, height: 32))
     view.autoresizingMask = [.width]
 
-    let iconName = (current <= 5) ? "waveform.slash" : "ear"
+    let iconName = (current >= 5) ? "waveform.slash" : "ear"
     let iconImg = NSImage(systemSymbolName: iconName, accessibilityDescription: nil)
     iconImg?.isTemplate = true
     let iconView = NSImageView(frame: NSRect(x: 14, y: 8, width: 16, height: 16))

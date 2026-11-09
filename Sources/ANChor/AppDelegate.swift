@@ -84,11 +84,11 @@ public class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         accessibility = "ANChor — \(mode.label)"
       } else {
         name = (bose.cncLevel <= 5) ? "waveform.slash" : "ear"
-        accessibility = "ANChor — Level \(bose.cncLevel)"
+        accessibility = "ANChor — Level \(cncDisplayLevel(raw: bose.cncLevel))"
       }
     } else {
       name = "headphones"
-      let modeLabel = bose.currentMode?.label ?? "Level \(bose.cncLevel)"
+      let modeLabel = bose.currentMode?.label ?? "Level \(cncDisplayLevel(raw: bose.cncLevel))"
       accessibility = "ANChor — \(modeLabel)"
     }
     let img = NSImage(systemSymbolName: name, accessibilityDescription: accessibility)
@@ -116,6 +116,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     if let openMenu = activeMenu ?? statusItem.menu {
       updateListeningModeItems(in: openMenu, level: bose.cncLevel)
       updateNoiseSliderItem(in: openMenu, level: bose.cncLevel)
+      updateVolumeSliderItem(in: openMenu, volume: bose.volumeInfo)
+      updateAudioSourceItems(in: openMenu, device: bose)
     }
 
     if activeMenu == nil {
@@ -144,13 +146,14 @@ public class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   @objc public func cncSliderChanged(_ sender: NSSlider) {
-    let step = UInt8(clamping: Int(round(sender.doubleValue)))
+    let shown = Int(round(sender.doubleValue))
+    let raw = cncRawLevel(displayed: shown)
     if let container = sender.superview {
       if let label = container.viewWithTag(99) as? NSTextField {
-        label.stringValue = "Level \(step)"
+        label.stringValue = "Level \(shown)"
       }
       if let iconView = container.viewWithTag(98) as? NSImageView {
-        let iconName = (step <= 5) ? "waveform.slash" : "ear"
+        let iconName = (shown >= 5) ? "waveform.slash" : "ear"
         let img = NSImage(systemSymbolName: iconName, accessibilityDescription: nil)
         img?.isTemplate = true
         iconView.image = img
@@ -159,12 +162,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     let targetMenu = sender.enclosingMenuItem?.menu ?? activeMenu ?? statusItem.menu
     if let menu = targetMenu {
-      updateListeningModeItems(in: menu, level: step)
+      updateListeningModeItems(in: menu, level: raw)
     }
 
-    if step != bose.cncLevel {
-      AppLog.ui.debug("cncSliderChanged → \(step)")
-      bose.setCNCLevel(step)
+    if raw != bose.cncLevel {
+      AppLog.ui.debug("cncSliderChanged → shown \(shown) (raw \(raw))")
+      bose.setCNCLevel(raw)
     }
   }
 
@@ -195,6 +198,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let newState = !bose.voicePromptsEnabled
     AppLog.ui.info("toggleVoicePrompts → \(newState)")
     bose.setVoicePrompts(enabled: newState)
+  }
+
+  @objc public func standbyTimerClicked(_ sender: NSMenuItem) {
+    let mins = UInt8(clamping: sender.tag)
+    AppLog.ui.info("standbyTimerClicked → \(mins) min")
+    bose.setStandbyTimer(mins)
   }
 
   @objc public func shortcutActionClicked(_ sender: NSMenuItem) {
@@ -268,6 +277,12 @@ public class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     bose.setVolume(level)
   }
 
+  @objc public func connectPairedDeviceClicked(_ sender: NSMenuItem) {
+    guard let mac = sender.representedObject as? String else { return }
+    AppLog.ui.info("connectPairedDeviceClicked → \(mac, privacy: .public)")
+    bose.connectPairedDevice(mac: mac)
+  }
+
   @objc public func copySerialNumber() {
     if let serial = bose.metadata.serialNumber {
       NSPasteboard.general.clearContents()
@@ -284,6 +299,22 @@ public class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     if let fw = bose.metadata.firmwareVersion { lines.append("Firmware: \(fw)") }
     if let proto = bose.metadata.protocolVersion { lines.append("Protocol: BMAP \(proto)") }
     if let serial = bose.metadata.serialNumber { lines.append("Serial Number: \(serial)") }
+    if let guid = bose.metadata.productGuid { lines.append("Product GUID [0.12]: \(guid)") }
+    lines.append("Motion Auto-off [1.20]: \(bose.motionAutoOffEnabled ? "On" : "Off") (read-only)")
+    if let name = bose.metadata.deviceName { lines.append("BMAP Name [1.2]: \(name)") }
+    if let codename = bose.metadata.reportedCodename {
+      lines.append("Codename [18.12]: \(codename)")
+    }
+    if let plat = bose.metadata.platformName { lines.append("Platform [18.13]: \(plat)") }
+    if let standby = bose.metadata.standbyTimer {
+      lines.append(
+        standby == 0 ? "Auto-off [1.4]: Never" : "Auto-off [1.4]: \(standby) min")
+    }
+    for dev in bose.pairedDevices {
+      let state =
+        dev.isConnected ? (dev.isActiveAudioSource ? "connected, active" : "connected") : "paired"
+      lines.append("Paired: \(dev.name) [\(dev.macAddress)] (\(state))")
+    }
     if let batt = bose.batteryInfo.lowestLevel { lines.append("Battery: \(batt)%") }
 
     let text = lines.joined(separator: "\n")
@@ -357,22 +388,72 @@ public class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   public func updateNoiseSliderItem(in menu: NSMenu, level: UInt8) {
+    let shown = cncDisplayLevel(raw: level)
     guard let item = menu.items.first(where: { $0.tag == 777 }), let container = item.view else {
       return
     }
     if let slider = container.viewWithTag(97) as? NSSlider {
-      if UInt8(clamping: Int(round(slider.doubleValue))) != level {
-        slider.doubleValue = Double(level)
+      if Int(round(slider.doubleValue)) != shown {
+        slider.doubleValue = Double(shown)
       }
     }
     if let label = container.viewWithTag(99) as? NSTextField {
-      label.stringValue = "Level \(level)"
+      label.stringValue = "Level \(shown)"
     }
     if let iconView = container.viewWithTag(98) as? NSImageView {
-      let iconName = (level <= 5) ? "waveform.slash" : "ear"
+      let iconName = (shown >= 5) ? "waveform.slash" : "ear"
       let img = NSImage(systemSymbolName: iconName, accessibilityDescription: nil)
       img?.isTemplate = true
       iconView.image = img
+    }
+  }
+
+  public func updateVolumeSliderItem(in menu: NSMenu, volume: VolumeInfo) {
+    guard let item = menu.items.first(where: { $0.tag == 778 }), let container = item.view else {
+      return
+    }
+    let maxVal = Double(volume.max > 0 ? volume.max : 16)
+    if let slider = container.viewWithTag(96) as? NSSlider {
+      slider.maxValue = maxVal
+      if UInt8(clamping: Int(round(slider.doubleValue))) != volume.current {
+        slider.doubleValue = Double(volume.current)
+      }
+    }
+    if let label = container.viewWithTag(99) as? NSTextField {
+      let pct = Int(round((Double(volume.current) / maxVal) * 100.0))
+      label.stringValue = "\(pct)%"
+    }
+    if let iconView = container.viewWithTag(98) as? NSImageView {
+      let iconName =
+        (volume.current == 0)
+        ? "speaker.slash.fill"
+        : (volume.current <= 8 ? "speaker.wave.1.fill" : "speaker.wave.3.fill")
+      let img = NSImage(systemSymbolName: iconName, accessibilityDescription: nil)
+      img?.isTemplate = true
+      iconView.image = img
+    }
+  }
+
+  public func updateAudioSourceItems(in menu: NSMenu, device: BoseDevice) {
+    if let item = menu.items.first(where: { $0.tag == 781 }) {
+      if let local = device.localDevice {
+        let badge = local.isActiveAudioSource ? " (Active Audio)" : ""
+        item.title = "This Mac: \(local.name)\(badge)"
+        item.state = local.isActiveAudioSource ? .on : .off
+      }
+    }
+    if let item = menu.items.first(where: { $0.tag == 782 }) {
+      if let second = device.secondDevice, second.isConnected {
+        let badge = second.isActiveAudioSource ? " (Active Audio)" : ""
+        item.title = "Second Device: \(second.name)\(badge)"
+        item.state = second.isActiveAudioSource ? .on : .off
+      } else {
+        item.title = "Second Device: None"
+        item.state = .off
+      }
+    }
+    if let item = menu.items.first(where: { $0.tag == 783 }) {
+      item.title = "Motion Auto-off: \(device.motionAutoOffEnabled ? "On" : "Off")"
     }
   }
 }

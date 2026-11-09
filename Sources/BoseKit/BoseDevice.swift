@@ -31,10 +31,14 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
   public private(set) var sidetone: SidetoneLevel = .medium
   public private(set) var voicePromptsEnabled: Bool = true
   public private(set) var multipointEnabled: Bool = false
+  public private(set) var motionAutoOffEnabled: Bool = true
   public private(set) var shortcutAction: ShortcutAction = .batteryLevel
   public private(set) var cncFavorites: CncFavorites = CncFavorites()
   public private(set) var secondDevice: ConnectedDevice? = nil
   public private(set) var localDevice: ConnectedDevice? = nil
+  public private(set) var pairedDevices: [ConnectedDevice] = []
+  private var knownDeviceNames: [String: String] = [:]
+  private var nameLookupAttempted: Set<String> = []
   public private(set) var activeSourceMac: String? = nil
   public private(set) var isRemotePlaying: Bool = false
   public private(set) var volumeInfo: VolumeInfo = VolumeInfo()
@@ -173,6 +177,7 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
         RunLoop.current.run(until: Date().addingTimeInterval(0.01))
       }
 
+      nameLookupAttempted = []
       fetchDeviceMetadata()
       doRefreshState()
       startPollTimer()
@@ -192,7 +197,37 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
     DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
   }
 
+  /// Best-effort STATUS subscription. The Bose app sends this on every
+  /// connect; without it the NC700 applies SETGET writes but sends no reply
+  /// and never pushes headphone-side changes. Failures are logged and ignored.
+  private func enableNotifications() {
+    let payload: [UInt8] = [0x01, 0x00, 0x05, 0x02, 0x37]
+    guard
+      let resp = sendAndWait(
+        makeBMAPPacket(
+          fblock: BMAPFunctionBlock.notification,
+          funcID: BMAPFunction.notificationsByFblock,
+          op: BMAPOperator.setGet.rawValue, payload: payload),
+        timeout: 2.0)
+    else {
+      AppLog.device.info("Notifications [9.2]: no reply, continuing with polling")
+      return
+    }
+    if resp.count >= 4 {
+      let op = resp[2] & 0x0F
+      if op == BMAPOperator.status.rawValue {
+        AppLog.device.info("Notifications [9.2]: subscribed")
+      } else {
+        AppLog.device.info(
+          "Notifications [9.2]: refused (op=\(op)), continuing with polling")
+      }
+    }
+  }
+
   private func fetchDeviceMetadata() {
+    // Enable unsolicited STATUS pushes (Bose-app payload, blocks 0,1,2,4,5,9,16,18).
+    // Best-effort: without this the 700 applies SETGET writes but sends no reply.
+    enableNotifications()
     // Query Firmware Version [0.5]
     if let resp = sendAndWait(
       makeBMAPPacket(
@@ -234,6 +269,63 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
         if let str = String(bytes: payload, encoding: .utf8) {
           metadata.serialNumber = str
           AppLog.device.info("Serial: \(str, privacy: .public)")
+        }
+      }
+    }
+
+    // Query Device Name [1.2] (first payload byte is a flag, name starts at byte 1)
+    if let resp = sendAndWait(
+      makeBMAPPacket(
+        fblock: BMAPFunctionBlock.settings, funcID: BMAPFunction.productName,
+        op: BMAPOperator.get.rawValue))
+    {
+      if resp.count >= 5 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
+        let payload = Array(resp[5...])
+        if let str = String(bytes: payload, encoding: .utf8), !str.isEmpty {
+          metadata.deviceName = str
+          AppLog.device.info("Device name [1.2]: \(str, privacy: .public)")
+        }
+      }
+    }
+
+    // Query Product GUID [0.12] (16 bytes, shown as 8-4-4-4-12)
+    if let resp = sendAndWait(
+      makeBMAPPacket(
+        fblock: BMAPFunctionBlock.deviceInfo, funcID: BMAPFunction.productGuid,
+        op: BMAPOperator.get.rawValue))
+    {
+      if resp.count >= 20 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
+        if let guid = formatGuid(Array(resp[4..<20])) {
+          metadata.productGuid = guid
+          AppLog.device.info("GUID [0.12]: \(guid, privacy: .public)")
+        }
+      }
+    }
+
+    // Query reported codename [18.12] and platform [18.13] (read-only identification)
+    if let resp = sendAndWait(
+      makeBMAPPacket(
+        fblock: BMAPFunctionBlock.authentication, funcID: BMAPFunction.authCodename,
+        op: BMAPOperator.get.rawValue))
+    {
+      if resp.count >= 4 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
+        let payload = Array(resp[4...])
+        if let str = String(bytes: payload, encoding: .utf8), !str.isEmpty {
+          metadata.reportedCodename = str
+          AppLog.device.info("Codename [18.12]: \(str, privacy: .public)")
+        }
+      }
+    }
+    if let resp = sendAndWait(
+      makeBMAPPacket(
+        fblock: BMAPFunctionBlock.authentication, funcID: BMAPFunction.authPlatform,
+        op: BMAPOperator.get.rawValue))
+    {
+      if resp.count >= 4 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
+        let payload = Array(resp[4...])
+        if let str = String(bytes: payload, encoding: .utf8), !str.isEmpty {
+          metadata.platformName = str
+          AppLog.device.info("Platform [18.13]: \(str, privacy: .public)")
         }
       }
     }
@@ -382,6 +474,36 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
       }
     }
 
+    // 6c. Motion Auto-off [1.20] (read-only: unauthenticated SETGET writes
+    // are refused with InvalidData; the Bose app toggles it authenticated)
+    if let resp = sendAndWait(
+      makeBMAPPacket(
+        fblock: BMAPFunctionBlock.settings, funcID: BMAPFunction.motionAutoOff,
+        op: BMAPOperator.get.rawValue))
+    {
+      if resp.count >= 5 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
+        let raw = resp[4]
+        if (raw != 0) != self.motionAutoOffEnabled {
+          self.motionAutoOffEnabled = raw != 0
+          AppLog.device.info("Motion auto-off [1.20]: \(raw)")
+        }
+      }
+    }
+    // 6b. Standby Timer [1.4] (writable via SETGET, verified on hardware)
+    if let resp = sendAndWait(
+      makeBMAPPacket(
+        fblock: BMAPFunctionBlock.settings, funcID: BMAPFunction.standbyTimer,
+        op: BMAPOperator.get.rawValue))
+    {
+      if resp.count >= 5 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
+        let raw = resp[4]
+        if metadata.standbyTimer != raw {
+          metadata.standbyTimer = raw
+          AppLog.device.info("Standby timer [1.4]: \(raw)")
+        }
+      }
+    }
+
     // 7. Shortcut Button [1.9]
     if let resp = sendAndWait(
       makeBMAPPacket(
@@ -439,7 +561,7 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
       }
     }
 
-    // 11. Connected Devices [4.4]
+    // 11. Connected Devices [4.4] — full paired list
     if let resp = sendAndWait(
       makeBMAPPacket(
         fblock: BMAPFunctionBlock.deviceManagement, funcID: BMAPFunction.listDevices,
@@ -451,6 +573,7 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
         var slot = 0
         var foundSecond: ConnectedDevice? = nil
         var foundLocal: ConnectedDevice? = nil
+        var all: [ConnectedDevice] = []
         while offset + 6 <= resp.count {
           let macBytes = Array(resp[offset..<(offset + 6)])
           let macStr = macBytes.map { String(format: "%02x", $0) }.joined(separator: ":")
@@ -458,7 +581,10 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
           let isLocal = (macStr == localMacAddressString)
           let isActive = (macStr == activeSourceMac)
 
-          var devName = isLocal ? "MacBook Pro" : "Bluetooth Device"
+          // Resolve names only for connected devices; for disconnected ones
+          // try once per session (cached after) so idle polls stay fast.
+          var devName =
+            knownDeviceNames[macStr] ?? (isLocal ? "MacBook Pro" : "Bluetooth Device")
           if isConn {
             if let nameResp = sendAndWait(
               makeBMAPPacket(
@@ -469,6 +595,24 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
                 let nameData = Array(nameResp[13...])
                 if let str = String(bytes: nameData, encoding: .utf8), !str.isEmpty {
                   devName = str
+                  knownDeviceNames[macStr] = str
+                }
+              }
+            }
+          } else if knownDeviceNames[macStr] == nil
+            && !nameLookupAttempted.contains(macStr)
+          {
+            nameLookupAttempted.insert(macStr)
+            if let nameResp = sendAndWait(
+              makeBMAPPacket(
+                fblock: BMAPFunctionBlock.deviceManagement, funcID: BMAPFunction.peerDeviceInfo,
+                op: BMAPOperator.get.rawValue, payload: macBytes))
+            {
+              if nameResp.count > 13 {
+                let nameData = Array(nameResp[13...])
+                if let str = String(bytes: nameData, encoding: .utf8), !str.isEmpty {
+                  devName = str
+                  knownDeviceNames[macStr] = str
                 }
               }
             }
@@ -477,15 +621,17 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
           let dev = ConnectedDevice(
             macAddress: macStr, name: devName, isConnected: isConn, isLocalHost: isLocal,
             isActiveAudioSource: isActive)
+          all.append(dev)
           if isLocal {
             foundLocal = dev
-          } else if isConn {
+          } else if isConn && foundSecond == nil {
             foundSecond = dev
           }
 
           offset += 6
           slot += 1
         }
+        pairedDevices = all
         secondDevice = foundSecond
         localDevice = foundLocal
       }
@@ -619,6 +765,34 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
       waitUntilDone: false)
   }
 
+  /// Sets the auto-off timer (minutes) via SETGET [1.4]. 0x00 = Never.
+  /// Verified on hardware: SETGET is accepted (STATUS echo), unlike SET/START.
+  public func setStandbyTimer(_ minutes: UInt8) {
+    metadata.standbyTimer = minutes
+    DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+    perform(
+      #selector(doSetStandbyTimer(_:)), on: btThread!, with: NSNumber(value: minutes),
+      waitUntilDone: false)
+  }
+
+  @objc private func doSetStandbyTimer(_ num: NSNumber) {
+    let val = num.uint8Value
+    AppLog.device.info("setStandbyTimer: \(val)")
+    guard
+      let resp = sendAndWait(
+        makeBMAPPacket(
+          fblock: BMAPFunctionBlock.settings, funcID: BMAPFunction.standbyTimer,
+          op: BMAPOperator.setGet.rawValue, payload: [val]),
+        timeout: 2.0)
+    else {
+      AppLog.device.info("setStandbyTimer: no reply, will correct on refresh")
+      return
+    }
+    if resp.count >= 4 {
+      AppLog.device.info("setStandbyTimer: reply op=\(resp[2] & 0x0F)")
+    }
+  }
+
   @objc private func doSetVoicePrompts(_ num: NSNumber) {
     let en = num.boolValue
     let payloadByte = (en ? 0x20 : 0x00) | (voiceLanguageId & 0x1F)
@@ -737,6 +911,39 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
     } else {
       sendRemotePlay()
     }
+  }
+
+  /// Asks the headphones to connect (and route audio) to a paired device.
+  /// Async: the ack is PROCESSING; success is silent, failure arrives later
+  /// as an ERROR. The 3s poll picks up the result.
+  public func connectPairedDevice(mac: String) {
+    guard let payload = buildConnectPayload(mac: mac) else {
+      AppLog.device.error("connectPairedDevice: malformed MAC \(mac, privacy: .public)")
+      return
+    }
+    AppLog.device.info("connectPairedDevice → \(mac, privacy: .public)")
+    perform(
+      #selector(doConnectPairedDevice(_:)), on: btThread!, with: payload,
+      waitUntilDone: false)
+  }
+
+  @objc private func doConnectPairedDevice(_ payload: [UInt8]) {
+    guard
+      let resp = sendAndWait(
+        makeBMAPPacket(
+          fblock: BMAPFunctionBlock.deviceManagement, funcID: BMAPFunction.connectDevice,
+          op: BMAPOperator.start.rawValue, payload: payload),
+        timeout: 5.0)
+    else {
+      AppLog.device.error("connectPairedDevice: no reply (will retry via poll)")
+      return
+    }
+    if resp.count >= 4 {
+      let op = resp[2] & 0x0F
+      // PROCESSING (7) = accepted, async. RESULT (6) = done. ERROR (4) = refused.
+      AppLog.device.info("connectPairedDevice: reply op=\(op)")
+    }
+    DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
   }
 
   // MARK: - Remote Volume Controls
