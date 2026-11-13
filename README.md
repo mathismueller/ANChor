@@ -3,7 +3,7 @@
 A lightweight macOS menu bar app for controlling Bose headphones and earbuds (Bose Noise Cancelling Headphones 700, QuietComfort series, and more) noise cancellation modes and audio settings.
 
 ![macOS](https://img.shields.io/badge/macOS-13%2B-blue)
-![Swift](https://img.shields.io/badge/Swift-5.9-orange)
+![Swift](https://img.shields.io/badge/Swift-6.0-orange)
 ![License](https://img.shields.io/badge/License-MIT-green)
 
 ## Features

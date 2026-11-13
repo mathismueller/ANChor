@@ -148,16 +148,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   @objc public func cncSliderChanged(_ sender: NSSlider) {
     let shown = Int(round(sender.doubleValue))
     let raw = cncRawLevel(displayed: shown)
-    if let container = sender.superview {
-      if let label = container.viewWithTag(99) as? NSTextField {
-        label.stringValue = "Level \(shown)"
-      }
-      if let iconView = container.viewWithTag(98) as? NSImageView {
-        let iconName = (shown >= 5) ? "waveform.slash" : "ear"
-        let img = NSImage(systemSymbolName: iconName, accessibilityDescription: nil)
-        img?.isTemplate = true
-        iconView.image = img
-      }
+    if let sliderView = sender.superview as? NoiseLevelSliderView {
+      sliderView.update(displayed: shown)
     }
 
     let targetMenu = sender.enclosingMenuItem?.menu ?? activeMenu ?? statusItem.menu
@@ -250,20 +242,8 @@ public class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
   @objc public func volumeSliderChanged(_ sender: NSSlider) {
     let level = UInt8(clamping: Int(round(sender.doubleValue)))
-    if let container = sender.superview {
-      let maxVal = Double(bose.volumeInfo.max > 0 ? bose.volumeInfo.max : 16)
-      let pct = Int(round((sender.doubleValue / maxVal) * 100.0))
-      if let label = container.viewWithTag(99) as? NSTextField {
-        label.stringValue = "\(pct)%"
-      }
-      if let iconView = container.viewWithTag(98) as? NSImageView {
-        let iconName =
-          (level == 0)
-          ? "speaker.slash.fill" : (level <= 8 ? "speaker.wave.1.fill" : "speaker.wave.3.fill")
-        let img = NSImage(systemSymbolName: iconName, accessibilityDescription: nil)
-        img?.isTemplate = true
-        iconView.image = img
-      }
+    if let sliderView = sender.superview as? VolumeSliderView {
+      sliderView.update(current: level, max: bose.volumeInfo.max)
     }
     if level != bose.volumeInfo.current {
       AppLog.ui.debug("volumeSliderChanged → \(level)")
@@ -389,49 +369,13 @@ public class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
   public func updateNoiseSliderItem(in menu: NSMenu, level: UInt8) {
     let shown = cncDisplayLevel(raw: level)
-    guard let item = menu.items.first(where: { $0.tag == 777 }), let container = item.view else {
-      return
-    }
-    if let slider = container.viewWithTag(97) as? NSSlider {
-      if Int(round(slider.doubleValue)) != shown {
-        slider.doubleValue = Double(shown)
-      }
-    }
-    if let label = container.viewWithTag(99) as? NSTextField {
-      label.stringValue = "Level \(shown)"
-    }
-    if let iconView = container.viewWithTag(98) as? NSImageView {
-      let iconName = (shown >= 5) ? "waveform.slash" : "ear"
-      let img = NSImage(systemSymbolName: iconName, accessibilityDescription: nil)
-      img?.isTemplate = true
-      iconView.image = img
-    }
+    let sliderView = menu.items.lazy.compactMap { $0.view as? NoiseLevelSliderView }.first
+    sliderView?.update(displayed: shown, syncSlider: true)
   }
 
   public func updateVolumeSliderItem(in menu: NSMenu, volume: VolumeInfo) {
-    guard let item = menu.items.first(where: { $0.tag == 778 }), let container = item.view else {
-      return
-    }
-    let maxVal = Double(volume.max > 0 ? volume.max : 16)
-    if let slider = container.viewWithTag(96) as? NSSlider {
-      slider.maxValue = maxVal
-      if UInt8(clamping: Int(round(slider.doubleValue))) != volume.current {
-        slider.doubleValue = Double(volume.current)
-      }
-    }
-    if let label = container.viewWithTag(99) as? NSTextField {
-      let pct = Int(round((Double(volume.current) / maxVal) * 100.0))
-      label.stringValue = "\(pct)%"
-    }
-    if let iconView = container.viewWithTag(98) as? NSImageView {
-      let iconName =
-        (volume.current == 0)
-        ? "speaker.slash.fill"
-        : (volume.current <= 8 ? "speaker.wave.1.fill" : "speaker.wave.3.fill")
-      let img = NSImage(systemSymbolName: iconName, accessibilityDescription: nil)
-      img?.isTemplate = true
-      iconView.image = img
-    }
+    let sliderView = menu.items.lazy.compactMap { $0.view as? VolumeSliderView }.first
+    sliderView?.update(current: volume.current, max: volume.max, syncSlider: true)
   }
 
   public func updateAudioSourceItems(in menu: NSMenu, device: BoseDevice) {

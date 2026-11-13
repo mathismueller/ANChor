@@ -530,43 +530,12 @@ public enum MenuBuilder {
     current: Int, max: Int, delegate: AppDelegate?
   ) -> NSMenuItem {
     let item = NSMenuItem()
-    item.tag = 778
-    let view = NSView(frame: NSRect(x: 0, y: 0, width: 230, height: 32))
-    view.autoresizingMask = [.width]
-
-    let iconName =
-      (current == 0)
-      ? "speaker.slash.fill" : (current <= 8 ? "speaker.wave.1.fill" : "speaker.wave.3.fill")
-    let iconImg = NSImage(systemSymbolName: iconName, accessibilityDescription: nil)
-    iconImg?.isTemplate = true
-    let iconView = NSImageView(frame: NSRect(x: 14, y: 8, width: 16, height: 16))
-    iconView.image = iconImg
-    iconView.contentTintColor = .secondaryLabelColor
-    iconView.tag = 98
-    view.addSubview(iconView)
-
-    let maxVal = max > 0 ? max : 16
-    let pct = Int(round((Double(current) / Double(maxVal)) * 100.0))
-    let label = NSTextField(labelWithString: "\(pct)%")
-    label.frame = NSRect(x: 180, y: 8, width: 36, height: 16)
-    label.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
-    label.textColor = .secondaryLabelColor
-    label.alignment = .right
-    label.autoresizingMask = [.minXMargin]
-    label.tag = 99
-    view.addSubview(label)
-
-    let slider = NSSlider(
-      value: Double(current), minValue: 0, maxValue: Double(maxVal), target: delegate,
-      action: #selector(AppDelegate.volumeSliderChanged(_:)))
-    slider.frame = NSRect(x: 36, y: 6, width: 138, height: 20)
-    slider.controlSize = .small
-    slider.isContinuous = true
-    slider.autoresizingMask = [.width]
-    slider.tag = 96
-    view.addSubview(slider)
-
-    item.view = view
+    item.view = VolumeSliderView(
+      current: current,
+      max: max,
+      target: delegate,
+      action: #selector(AppDelegate.volumeSliderChanged(_:))
+    )
     return item
   }
 
@@ -574,42 +543,11 @@ public enum MenuBuilder {
     current: Int, delegate: AppDelegate?
   ) -> NSMenuItem {
     let item = NSMenuItem()
-    item.tag = 777
-    let view = NSView(frame: NSRect(x: 0, y: 0, width: 230, height: 32))
-    view.autoresizingMask = [.width]
-
-    let iconName = (current >= 5) ? "waveform.slash" : "ear"
-    let iconImg = NSImage(systemSymbolName: iconName, accessibilityDescription: nil)
-    iconImg?.isTemplate = true
-    let iconView = NSImageView(frame: NSRect(x: 14, y: 8, width: 16, height: 16))
-    iconView.image = iconImg
-    iconView.contentTintColor = .secondaryLabelColor
-    iconView.tag = 98
-    view.addSubview(iconView)
-
-    let label = NSTextField(labelWithString: "Level \(current)")
-    label.frame = NSRect(x: 168, y: 8, width: 48, height: 16)
-    label.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
-    label.textColor = .secondaryLabelColor
-    label.alignment = .right
-    label.autoresizingMask = [.minXMargin]
-    label.tag = 99
-    view.addSubview(label)
-
-    let slider = NSSlider(
-      value: Double(current), minValue: 0, maxValue: 10, target: delegate,
-      action: #selector(AppDelegate.cncSliderChanged(_:)))
-    slider.frame = NSRect(x: 36, y: 6, width: 126, height: 20)
-    slider.numberOfTickMarks = 11
-    slider.allowsTickMarkValuesOnly = true
-    slider.tickMarkPosition = .below
-    slider.controlSize = .small
-    slider.isContinuous = true
-    slider.autoresizingMask = [.width]
-    slider.tag = 97
-    view.addSubview(slider)
-
-    item.view = view
+    item.view = NoiseLevelSliderView(
+      current: current,
+      target: delegate,
+      action: #selector(AppDelegate.cncSliderChanged(_:))
+    )
     return item
   }
 

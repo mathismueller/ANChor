@@ -1,117 +1,101 @@
 import AppKit
-import XCTest
+import Testing
 
 @testable import ANChor
 @testable import BoseKit
 
+@Suite("ANChor UI Tests")
 @MainActor
-final class ANChorTests: XCTestCase {
+struct ANChorTests {
 
-  func testDisconnectedMenuStructure() {
-    let device = BoseDevice()
-    // Default device is disconnected
+  @Test func disconnectedMenuStructure() throws {
+    let device = BoseDevice(transport: nil)
     let menu = MenuBuilder.buildMenu(device: device, delegate: nil)
 
-    // Must have device name header
-    XCTAssertEqual(menu.items.first?.title, device.deviceName)
+    #expect(menu.items.first?.title == device.deviceName)
 
-    // Must show "Not connected"
-    let titles = menu.items.map { $0.title }
-    XCTAssertTrue(titles.contains("Not connected"))
-    XCTAssertTrue(titles.contains("Reconnect"))
-    XCTAssertTrue(titles.contains("Start at Login"))
+    let titles = menu.items.map(\.title)
+    #expect(titles.contains("Not connected"))
+    #expect(titles.contains("Reconnect"))
+    #expect(titles.contains("Start at Login"))
 
-    let loginItem = menu.items.first(where: { $0.title == "Start at Login" })
-    XCTAssertNotNil(loginItem)
-    XCTAssertEqual(loginItem?.action, #selector(AppDelegate.toggleStartAtLogin))
-    XCTAssertEqual(loginItem?.state, .off)
+    let loginItem = try #require(menu.items.first { $0.title == "Start at Login" })
+    #expect(loginItem.action == #selector(AppDelegate.toggleStartAtLogin))
+    #expect(loginItem.state == .off)
 
     let menuEnabled = MenuBuilder.buildMenu(device: device, delegate: nil, startAtLogin: true)
-    let loginItemEnabled = menuEnabled.items.first(where: { $0.title == "Start at Login" })
-    XCTAssertEqual(loginItemEnabled?.state, .on)
+    let loginItemEnabled = try #require(menuEnabled.items.first { $0.title == "Start at Login" })
+    #expect(loginItemEnabled.state == .on)
 
-    // Must have standard quit item
-    let quitItem = menu.items.first(where: { $0.title == "Quit ANChor" })
-    XCTAssertNotNil(quitItem)
-    XCTAssertEqual(quitItem?.action, #selector(AppDelegate.quit))
-    XCTAssertEqual(quitItem?.keyEquivalent, "q")
+    let quitItem = try #require(menu.items.first { $0.title == "Quit ANChor" })
+    #expect(quitItem.action == #selector(AppDelegate.quit))
+    #expect(quitItem.keyEquivalent == "q")
   }
 
-  func testFormatDB() {
-    XCTAssertEqual(MenuBuilder.formatDB(0), "0 dB")
-    XCTAssertEqual(MenuBuilder.formatDB(4), "+4 dB")
-    XCTAssertEqual(MenuBuilder.formatDB(-3), "-3 dB")
+  @Test func formatDB() {
+    #expect(MenuBuilder.formatDB(0) == "0 dB")
+    #expect(MenuBuilder.formatDB(4) == "+4 dB")
+    #expect(MenuBuilder.formatDB(-3) == "-3 dB")
   }
 
-  func testBatterySymbolMapping() {
-    XCTAssertEqual(MenuBuilder.batterySymbol(forPercent: 100), "battery.100")
-    XCTAssertEqual(MenuBuilder.batterySymbol(forPercent: 85), "battery.75")
-    XCTAssertEqual(MenuBuilder.batterySymbol(forPercent: 50), "battery.50")
-    XCTAssertEqual(MenuBuilder.batterySymbol(forPercent: 25), "battery.25")
-    XCTAssertEqual(MenuBuilder.batterySymbol(forPercent: 10), "battery.0")
+  @Test(arguments: [
+    (percent: 100, symbol: "battery.100"),
+    (percent: 85, symbol: "battery.75"),
+    (percent: 50, symbol: "battery.50"),
+    (percent: 25, symbol: "battery.25"),
+    (percent: 10, symbol: "battery.0"),
+  ])
+  func batterySymbolMapping(percent: Int, symbol: String) {
+    #expect(MenuBuilder.batterySymbol(forPercent: percent) == symbol)
   }
 
-  func testVolumeSliderItemCreation() {
+  @Test func volumeSliderItemCreation() throws {
     let item = MenuBuilder.createVolumeSliderItem(current: 8, max: 16, delegate: nil)
-    XCTAssertNotNil(item.view)
-    let subviews = item.view?.subviews ?? []
-    XCTAssertEqual(subviews.count, 3)
+    let sliderView = try #require(item.view as? VolumeSliderView)
+    #expect(sliderView.slider.doubleValue == 8.0)
+    #expect(sliderView.slider.maxValue == 16.0)
+    #expect(sliderView.valueLabel.stringValue == "50%")
 
-    let slider = subviews.compactMap { $0 as? NSSlider }.first
-    XCTAssertNotNil(slider)
-    XCTAssertEqual(slider?.doubleValue, 8.0)
-    XCTAssertEqual(slider?.maxValue, 16.0)
-
-    let label = item.view?.viewWithTag(99) as? NSTextField
-    XCTAssertNotNil(label)
-    XCTAssertEqual(label?.stringValue, "50%")
+    sliderView.update(current: 0, max: 16, syncSlider: true)
+    #expect(sliderView.slider.doubleValue == 0.0)
+    #expect(sliderView.valueLabel.stringValue == "0%")
   }
 
-  func testNoiseLevelSliderItemCreation() {
+  @Test func noiseLevelSliderItemCreation() throws {
     let item = MenuBuilder.createNoiseLevelSliderItem(current: 5, delegate: nil)
-    XCTAssertNotNil(item.view)
-    let subviews = item.view?.subviews ?? []
-    XCTAssertEqual(subviews.count, 3)
+    let sliderView = try #require(item.view as? NoiseLevelSliderView)
+    #expect(sliderView.slider.doubleValue == 5.0)
+    #expect(sliderView.slider.maxValue == 10.0)
+    #expect(sliderView.slider.numberOfTickMarks == 11)
+    #expect(sliderView.slider.allowsTickMarkValuesOnly)
+    #expect(sliderView.valueLabel.stringValue == "Level 5")
 
-    let slider = subviews.compactMap { $0 as? NSSlider }.first
-    XCTAssertNotNil(slider)
-    XCTAssertEqual(slider?.doubleValue, 5.0)
-    XCTAssertEqual(slider?.maxValue, 10.0)
-    XCTAssertEqual(slider?.numberOfTickMarks, 11)
-    XCTAssertEqual(slider?.allowsTickMarkValuesOnly, true)
-
-    let label = item.view?.viewWithTag(99) as? NSTextField
-    XCTAssertNotNil(label)
-    XCTAssertEqual(label?.stringValue, "Level 5")
+    sliderView.update(displayed: 10, syncSlider: true)
+    #expect(sliderView.slider.doubleValue == 10.0)
+    #expect(sliderView.valueLabel.stringValue == "Level 10")
   }
 
-  func testListeningModeCheckedOnlyAtRespectiveLevels() {
-    let device = BoseDevice()
+  @Test func listeningModeCheckedOnlyAtRespectiveLevels() {
+    let device = BoseDevice(transport: nil)
     device.setConnectedForTesting(true)
     device.setDirectCNCForTesting(true)
 
     // At Level 0: Quiet is ON, Aware is OFF
     device.setCNCLevel(0)
     let menu0 = MenuBuilder.buildMenu(device: device, delegate: nil)
-    let quiet0 = menu0.items.first(where: { $0.title == "Quiet" })
-    let aware0 = menu0.items.first(where: { $0.title == "Aware" })
-    XCTAssertEqual(quiet0?.state, .on)
-    XCTAssertEqual(aware0?.state, .off)
+    #expect(menu0.items.first { $0.title == "Quiet" }?.state == .on)
+    #expect(menu0.items.first { $0.title == "Aware" }?.state == .off)
 
     // At Level 10: Quiet is OFF, Aware is ON
     device.setCNCLevel(10)
     let menu10 = MenuBuilder.buildMenu(device: device, delegate: nil)
-    let quiet10 = menu10.items.first(where: { $0.title == "Quiet" })
-    let aware10 = menu10.items.first(where: { $0.title == "Aware" })
-    XCTAssertEqual(quiet10?.state, .off)
-    XCTAssertEqual(aware10?.state, .on)
+    #expect(menu10.items.first { $0.title == "Quiet" }?.state == .off)
+    #expect(menu10.items.first { $0.title == "Aware" }?.state == .on)
 
     // At intermediate Level 5: BOTH Quiet and Aware are OFF
     device.setCNCLevel(5)
     let menu5 = MenuBuilder.buildMenu(device: device, delegate: nil)
-    let quiet5 = menu5.items.first(where: { $0.title == "Quiet" })
-    let aware5 = menu5.items.first(where: { $0.title == "Aware" })
-    XCTAssertEqual(quiet5?.state, .off)
-    XCTAssertEqual(aware5?.state, .off)
+    #expect(menu5.items.first { $0.title == "Quiet" }?.state == .off)
+    #expect(menu5.items.first { $0.title == "Aware" }?.state == .off)
   }
 }

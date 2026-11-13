@@ -2,20 +2,57 @@ import Foundation
 @preconcurrency import IOBluetooth
 import os
 
-/// High-level interface to a connected Bose Bluetooth headphone or earbud.
-public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
-  public static let shared = BoseDevice()
+/// Snapshot of device state produced on the Bluetooth thread and applied on `@MainActor`.
+struct BoseStateSnapshot: Sendable {
+  var isConnected: Bool?
+  var deviceName: String?
+  var usesDirectCNC: Bool?
+  var hasEqualizer: Bool?
+  var batteryInfo: BatteryInfo?
+  var currentMode: NoiseMode??
+  var cncLevel: UInt8?
+  var equalizer: EqualizerSettings?
+  var metadata: DeviceMetadata?
+  var sidetone: SidetoneLevel?
+  var voicePromptsEnabled: Bool?
+  var multipointEnabled: Bool?
+  var motionAutoOffEnabled: Bool?
+  var shortcutAction: ShortcutAction?
+  var cncFavorites: CncFavorites?
+  var secondDevice: ConnectedDevice??
+  var localDevice: ConnectedDevice??
+  var pairedDevices: [ConnectedDevice]?
+  var activeSourceMac: String??
+  var volumeInfo: VolumeInfo?
+}
 
-  private var channel: IOBluetoothRFCOMMChannel?
-  private var responseData: [UInt8] = []
-  private var responseReceived = false
-  private var btThread: Thread?
-  private var btRunLoop: RunLoop?
-  private let ready = DispatchSemaphore(value: 0)
-  private var reconnectTimer: Timer?
-  private var pollTimer: Timer?
-  private var connectNotification: IOBluetoothUserNotification?
-  private var isConnecting = false
+/// Abstraction over the Bluetooth worker so unit tests can instantiate `BoseDevice`
+/// without spawning background threads or registering `IOBluetooth` notifications.
+protocol BoseTransport: AnyObject, Sendable {
+  var onSnapshot: (@Sendable (BoseStateSnapshot) -> Void)? { get set }
+  func start()
+  func connect()
+  func disconnect()
+  func refreshState()
+  func setMode(_ mode: NoiseMode)
+  func setCNCLevel(_ step: UInt8)
+  func setEqualizerBand(id: UInt8, rawByte: UInt8)
+  func setSidetone(_ level: SidetoneLevel)
+  func setVoicePrompts(enabled: Bool)
+  func setStandbyTimer(_ minutes: UInt8)
+  func setMultipoint(enabled: Bool)
+  func setShortcutAction(_ action: ShortcutAction)
+  func setCncFavorites(activeIndex: UInt8, preset0: UInt8, preset1: UInt8, preset2: UInt8)
+  func sendRemotePlay()
+  func sendRemotePause()
+  func connectPairedDevice(payload: [UInt8])
+  func setVolume(_ level: UInt8)
+}
+
+/// High-level interface to a connected Bose Bluetooth headphone or earbud.
+@MainActor
+public final class BoseDevice: NSObject {
+  public static let shared = BoseDevice()
 
   // MARK: - Public State
 
@@ -37,28 +74,349 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
   public private(set) var secondDevice: ConnectedDevice? = nil
   public private(set) var localDevice: ConnectedDevice? = nil
   public private(set) var pairedDevices: [ConnectedDevice] = []
-  private var knownDeviceNames: [String: String] = [:]
-  private var nameLookupAttempted: Set<String> = []
   public private(set) var activeSourceMac: String? = nil
   public private(set) var isRemotePlaying: Bool = false
   public private(set) var volumeInfo: VolumeInfo = VolumeInfo()
-  private var localMacAddressString: String? = nil
 
   public var onUpdate: (() -> Void)?
 
+  private let transport: (any BoseTransport)?
+
+  public convenience override init() {
+    self.init(transport: BTWorker(), startTransport: true)
+  }
+
+  init(transport: (any BoseTransport)?, startTransport: Bool = false) {
+    self.transport = transport
+    super.init()
+    transport?.onSnapshot = { [weak self] snapshot in
+      Task { @MainActor [weak self] in
+        self?.apply(snapshot)
+      }
+    }
+    if startTransport {
+      transport?.start()
+    }
+  }
+
+  func apply(_ s: BoseStateSnapshot) {
+    if let v = s.isConnected { isConnected = v }
+    if let v = s.deviceName { deviceName = v }
+    if let v = s.usesDirectCNC { usesDirectCNC = v }
+    if let v = s.hasEqualizer { hasEqualizer = v }
+    if let v = s.batteryInfo { batteryInfo = v }
+    if let v = s.currentMode { currentMode = v }
+    if let v = s.cncLevel { cncLevel = v }
+    if let v = s.equalizer { equalizer = v }
+    if let v = s.metadata { metadata = v }
+    if let v = s.sidetone { sidetone = v }
+    if let v = s.voicePromptsEnabled { voicePromptsEnabled = v }
+    if let v = s.multipointEnabled { multipointEnabled = v }
+    if let v = s.motionAutoOffEnabled { motionAutoOffEnabled = v }
+    if let v = s.shortcutAction { shortcutAction = v }
+    if let v = s.cncFavorites { cncFavorites = v }
+    if let v = s.secondDevice { secondDevice = v }
+    if let v = s.localDevice { localDevice = v }
+    if let v = s.pairedDevices { pairedDevices = v }
+    if let v = s.activeSourceMac { activeSourceMac = v }
+    if let v = s.volumeInfo { volumeInfo = v }
+    onUpdate?()
+  }
+
+  public nonisolated func log(_ msg: String, level: OSLogType = .info) {
+    AppLog.device.log(level: level, "\(msg, privacy: .public)")
+  }
+
+  #if DEBUG
+    public func setDirectCNCForTesting(_ direct: Bool) {
+      usesDirectCNC = direct
+    }
+
+    public func setConnectedForTesting(_ connected: Bool) {
+      isConnected = connected
+    }
+  #endif
+
+  public func connectAsync() {
+    transport?.connect()
+  }
+
+  public func disconnect() {
+    isConnected = false
+    onUpdate?()
+    transport?.disconnect()
+  }
+
+  public func refreshState() {
+    transport?.refreshState()
+  }
+
+  // MARK: - Control Actions
+
+  public func setMode(_ mode: NoiseMode) {
+    currentMode = mode
+    onUpdate?()
+    transport?.setMode(mode)
+  }
+
+  public func setCNCLevel(_ step: UInt8) {
+    let clamped = max(0, min(10, step))
+    cncLevel = clamped
+    if clamped == 0 {
+      currentMode = .quiet
+    } else if clamped == 10 {
+      currentMode = .aware
+    } else {
+      currentMode = nil
+    }
+    onUpdate?()
+    transport?.setCNCLevel(clamped)
+  }
+
+  public func setEqualizerBand(id: UInt8, level: Int) {
+    let clamped = max(-10, min(10, level))
+    switch id {
+    case EqBand.bassId: equalizer.bass = clamped
+    case EqBand.midId: equalizer.mid = clamped
+    case EqBand.trebleId: equalizer.treble = clamped
+    default: break
+    }
+    onUpdate?()
+    let rawByte = UInt8(clamped < 0 ? clamped + 256 : clamped)
+    transport?.setEqualizerBand(id: id, rawByte: rawByte)
+  }
+
+  public func setSidetone(_ level: SidetoneLevel) {
+    sidetone = level
+    onUpdate?()
+    transport?.setSidetone(level)
+  }
+
+  public func setVoicePrompts(enabled: Bool) {
+    voicePromptsEnabled = enabled
+    onUpdate?()
+    transport?.setVoicePrompts(enabled: enabled)
+  }
+
+  /// Sets the auto-off timer (minutes) via SETGET [1.4]. 0x00 = Never.
+  /// Verified on hardware: SETGET is accepted (STATUS echo), unlike SET/START.
+  public func setStandbyTimer(_ minutes: UInt8) {
+    metadata.standbyTimer = minutes
+    onUpdate?()
+    transport?.setStandbyTimer(minutes)
+  }
+
+  public func setMultipoint(enabled: Bool) {
+    multipointEnabled = enabled
+    onUpdate?()
+    transport?.setMultipoint(enabled: enabled)
+  }
+
+  public func setShortcutAction(_ action: ShortcutAction) {
+    shortcutAction = action
+    onUpdate?()
+    transport?.setShortcutAction(action)
+  }
+
+  public func setCncFavorites(preset0: Int, preset1: Int, preset2: Int) {
+    let p0 = UInt8(clamping: preset0)
+    let p1 = UInt8(clamping: preset1)
+    let p2 = UInt8(clamping: preset2)
+    let curIdx = UInt8(cncFavorites.activeIndex)
+    cncFavorites.preset0 = Int(p0)
+    cncFavorites.preset1 = Int(p1)
+    cncFavorites.preset2 = Int(p2)
+    onUpdate?()
+    transport?.setCncFavorites(activeIndex: curIdx, preset0: p0, preset1: p1, preset2: p2)
+  }
+
+  public func selectCncFavorite(index: Int) {
+    let idx = UInt8(index % 3)
+    let p0 = UInt8(cncFavorites.preset0)
+    let p1 = UInt8(cncFavorites.preset1)
+    let p2 = UInt8(cncFavorites.preset2)
+    cncFavorites.activeIndex = Int(idx)
+    let targetLevel = idx == 0 ? p0 : (idx == 1 ? p1 : p2)
+    cncLevel = targetLevel
+    if targetLevel == 0 {
+      currentMode = .quiet
+    } else if targetLevel == 10 {
+      currentMode = .aware
+    } else {
+      currentMode = nil
+    }
+    onUpdate?()
+    transport?.setCncFavorites(activeIndex: idx, preset0: p0, preset1: p1, preset2: p2)
+  }
+
+  // MARK: - Remote Media Transport Controls
+
+  public func sendRemotePlay() {
+    isRemotePlaying = true
+    onUpdate?()
+    transport?.sendRemotePlay()
+  }
+
+  public func sendRemotePause() {
+    isRemotePlaying = false
+    onUpdate?()
+    transport?.sendRemotePause()
+  }
+
+  public func toggleRemotePlayback() {
+    if isRemotePlaying {
+      sendRemotePause()
+    } else {
+      sendRemotePlay()
+    }
+  }
+
+  /// Asks the headphones to connect (and route audio) to a paired device.
+  /// Async: the ack is PROCESSING; success is silent, failure arrives later
+  /// as an ERROR. The 3s poll picks up the result.
+  public func connectPairedDevice(mac: String) {
+    guard let payload = buildConnectPayload(mac: mac) else {
+      AppLog.device.error("connectPairedDevice: malformed MAC \(mac, privacy: .public)")
+      return
+    }
+    AppLog.device.info("connectPairedDevice → \(mac, privacy: .public)")
+    transport?.connectPairedDevice(payload: payload)
+  }
+
+  // MARK: - Remote Volume Controls
+
+  public func setVolume(_ level: UInt8) {
+    let clamped = min(max(level, 0), volumeInfo.max)
+    volumeInfo.current = clamped
+    onUpdate?()
+    transport?.setVolume(clamped)
+  }
+
+  public func volumeUp() {
+    if volumeInfo.current < volumeInfo.max {
+      setVolume(volumeInfo.current + 1)
+    }
+  }
+
+  public func volumeDown() {
+    if volumeInfo.current > 0 {
+      setVolume(volumeInfo.current - 1)
+    }
+  }
+}
+
+// MARK: - Bluetooth Worker (dedicated RunLoop thread)
+
+/// Owns all `IOBluetooth` channel state and timers exclusively on `btThread`.
+private final class BTWorker: NSObject, BoseTransport, IOBluetoothRFCOMMChannelDelegate,
+  @unchecked Sendable
+{
+  private var channel: IOBluetoothRFCOMMChannel?
+  private var expectedFBlock: UInt8?
+  private var expectedFuncID: UInt8?
+  private var responsePacket: BMAPPacket?
+  private var responseReceived = false
+  private var btThread: Thread?
+  private var btRunLoop: RunLoop?
+  private let ready = DispatchSemaphore(value: 0)
+  private var reconnectTimer: Timer?
+  private var pollTimer: Timer?
+  private var connectNotification: IOBluetoothUserNotification?
+  private var isConnecting = false
+
+  private var isConnected = false
+  private var deviceName = "Bose Device"
+  private var usesDirectCNC = false
+  private var hasEqualizer = true
+  private var metadata = DeviceMetadata()
+  private var currentMode: NoiseMode? = .quiet
+  private var cncLevel: UInt8 = 0
+  private var equalizer = EqualizerSettings()
+  private var sidetone: SidetoneLevel = .medium
+  private var voicePromptsEnabled = true
+  private var multipointEnabled = false
+  private var motionAutoOffEnabled = true
+  private var shortcutAction: ShortcutAction = .batteryLevel
+  private var cncFavorites = CncFavorites()
+  private var volumeInfo = VolumeInfo()
+  private var activeSourceMac: String? = nil
+  private var localMacAddressString: String? = nil
+  private var knownDeviceNames: [String: String] = [:]
+  private var nameLookupAttempted: Set<String> = []
+
   private var targetChannelID: BluetoothRFCOMMChannelID = 2
-  private var lastModeChangeTime: Date = Date.distantPast
-  private var pendingMode: NoiseMode = .quiet
+  private var lastModeChangeTime: Date = .distantPast
   private var voiceLanguageId: UInt8 = 1
 
-  public override init() {
-    super.init()
+  var onSnapshot: (@Sendable (BoseStateSnapshot) -> Void)?
+
+  deinit {
+    connectNotification?.unregister()
+  }
+
+  func start() {
     startBTThread()
     registerForConnectNotifications()
   }
 
-  deinit {
-    connectNotification?.unregister()
+  func connect() { enqueue(#selector(doConnect)) }
+  func disconnect() { enqueue(#selector(doDisconnect)) }
+  func refreshState() { enqueue(#selector(doRefreshState)) }
+  func setMode(_ mode: NoiseMode) {
+    enqueue(#selector(doSetMode(_:)), with: NSNumber(value: mode.rawValue))
+  }
+  func setCNCLevel(_ step: UInt8) {
+    enqueue(#selector(doSetCNC(_:)), with: NSNumber(value: step))
+  }
+  func setEqualizerBand(id: UInt8, rawByte: UInt8) {
+    enqueue(#selector(doSetEQBand(_:)), with: [id, rawByte] as NSArray)
+  }
+  func setSidetone(_ level: SidetoneLevel) {
+    enqueue(#selector(doSetSidetone(_:)), with: NSNumber(value: level.rawValue))
+  }
+  func setVoicePrompts(enabled: Bool) {
+    enqueue(#selector(doSetVoicePrompts(_:)), with: NSNumber(value: enabled))
+  }
+  func setStandbyTimer(_ minutes: UInt8) {
+    enqueue(#selector(doSetStandbyTimer(_:)), with: NSNumber(value: minutes))
+  }
+  func setMultipoint(enabled: Bool) {
+    enqueue(#selector(doSetMultipoint(_:)), with: NSNumber(value: enabled))
+  }
+  func setShortcutAction(_ action: ShortcutAction) {
+    enqueue(#selector(doSetShortcut(_:)), with: NSNumber(value: action.rawValue))
+  }
+  func setCncFavorites(activeIndex: UInt8, preset0: UInt8, preset1: UInt8, preset2: UInt8) {
+    enqueue(
+      #selector(doSetCncFavorites(_:)),
+      with: [activeIndex, preset0, preset1, preset2] as NSArray)
+  }
+  func sendRemotePlay() { enqueue(#selector(doSendRemotePlay)) }
+  func sendRemotePause() { enqueue(#selector(doSendRemotePause)) }
+  func connectPairedDevice(payload: [UInt8]) {
+    enqueue(#selector(doConnectPairedDevice(_:)), with: payload as NSArray)
+  }
+  func setVolume(_ level: UInt8) {
+    enqueue(#selector(doSetVolume(_:)), with: NSNumber(value: level))
+  }
+
+  private func startBTThread() {
+    let thread = Thread { [weak self] in
+      self?.btRunLoop = RunLoop.current
+      self?.ready.signal()
+      let port = Port()
+      RunLoop.current.add(port, forMode: .default)
+      RunLoop.current.run()
+    }
+    thread.name = "BoseKit-BT"
+    btThread = thread
+    thread.start()
+    ready.wait()
+  }
+
+  private func enqueue(_ selector: Selector, with arg: Any? = nil) {
+    guard let thread = btThread else { return }
+    perform(selector, on: thread, with: arg, waitUntilDone: false)
   }
 
   private func registerForConnectNotifications() {
@@ -74,57 +432,29 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
     guard let dev = device else { return }
     let name = dev.name ?? "unknown"
     AppLog.bluetooth.debug("Bluetooth device connected event from: \(name, privacy: .public)")
+    enqueue(#selector(doConnectIfNeeded))
+  }
+
+  @objc private func doConnectIfNeeded() {
     if !isConnected && channel == nil && !isConnecting {
-      connectAsync()
+      doConnect()
     }
   }
 
-  public func log(_ msg: String, level: OSLogType = .info) {
-    AppLog.device.log(level: level, "\(msg, privacy: .public)")
-  }
-
-  #if DEBUG
-    public func setDirectCNCForTesting(_ direct: Bool) {
-      usesDirectCNC = direct
-    }
-
-    public func setConnectedForTesting(_ connected: Bool) {
-      isConnected = connected
-    }
-  #endif
-
-  private func startBTThread() {
-    btThread = Thread { [weak self] in
-      self?.btRunLoop = RunLoop.current
-      self?.ready.signal()
-      let port = Port()
-      RunLoop.current.add(port, forMode: .default)
-      RunLoop.current.run()
-    }
-    btThread?.name = "BoseKit-BT"
-    btThread?.start()
-    ready.wait()
-  }
-
-  public func connectAsync() {
-    perform(#selector(doConnect), on: btThread!, with: nil, waitUntilDone: false)
-  }
-
-  @objc private func doConnect() {
+  @objc func doConnect() {
     guard channel == nil, !isConnected, !isConnecting else { return }
     isConnecting = true
     defer { isConnecting = false }
 
     guard
-      let discovered = BoseDiscovery.findDevice(log: { [weak self] in self?.log($0, level: .debug) }
-      )
+      let discovered = BoseDiscovery.findDevice(log: {
+        AppLog.device.debug("\($0, privacy: .public)")
+      })
     else {
       AppLog.bluetooth.error("❌ No Bose device found")
-      startReconnectTimer()
-      DispatchQueue.main.async { [weak self] in
-        self?.isConnected = false
-        self?.onUpdate?()
-      }
+      isConnected = false
+      scheduleReconnectTimer()
+      onSnapshot?(BoseStateSnapshot(isConnected: false))
       return
     }
 
@@ -163,7 +493,6 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
       AppLog.bluetooth.notice("✅ Connected to \(self.deviceName, privacy: .public)")
       stopReconnectTimer()
 
-      // Save to UserDefaults for 0ms fast-path on next launch
       if let addr = dev.addressString {
         let defaults = UserDefaults.standard
         defaults.set(addr, forKey: "lastBoseDeviceAddress")
@@ -171,7 +500,6 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
         defaults.set(usesDirectCNC, forKey: "lastBoseDirectCNC")
       }
 
-      // Quick yield then fetch metadata & state
       let drainEnd = Date().addingTimeInterval(0.05)
       while Date() < drainEnd {
         RunLoop.current.run(until: Date().addingTimeInterval(0.01))
@@ -180,491 +508,353 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
       nameLookupAttempted = []
       fetchDeviceMetadata()
       doRefreshState()
-      startPollTimer()
+      schedulePollTimer()
     } else {
       AppLog.bluetooth.error("❌ RFCOMM failed: \(result)")
       isConnected = false
-      startReconnectTimer()
+      scheduleReconnectTimer()
+      onSnapshot?(
+        BoseStateSnapshot(
+          isConnected: false,
+          usesDirectCNC: usesDirectCNC,
+          hasEqualizer: hasEqualizer,
+          metadata: metadata
+        ))
     }
-    DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
   }
 
-  public func disconnect() {
+  @objc func doDisconnect() {
     stopPollTimer()
+    stopReconnectTimer()
     _ = channel?.close()
     channel = nil
     isConnected = false
-    DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+    onSnapshot?(BoseStateSnapshot(isConnected: false))
   }
 
-  /// Best-effort STATUS subscription. The Bose app sends this on every
-  /// connect; without it the NC700 applies SETGET writes but sends no reply
-  /// and never pushes headphone-side changes. Failures are logged and ignored.
   private func enableNotifications() {
     let payload: [UInt8] = [0x01, 0x00, 0x05, 0x02, 0x37]
     guard
-      let resp = sendAndWait(
-        makeBMAPPacket(
-          fblock: BMAPFunctionBlock.notification,
-          funcID: BMAPFunction.notificationsByFblock,
-          op: BMAPOperator.setGet.rawValue, payload: payload),
-        timeout: 2.0)
+      let pkt = query(
+        BMAPFunctionBlock.notification, BMAPFunction.notificationsByFblock,
+        op: .setGet, payload: payload, timeout: 2.0)
     else {
       AppLog.device.info("Notifications [9.2]: no reply, continuing with polling")
       return
     }
-    if resp.count >= 4 {
-      let op = resp[2] & 0x0F
-      if op == BMAPOperator.status.rawValue {
-        AppLog.device.info("Notifications [9.2]: subscribed")
-      } else {
-        AppLog.device.info(
-          "Notifications [9.2]: refused (op=\(op)), continuing with polling")
-      }
+    if pkt.operator == .status {
+      AppLog.device.info("Notifications [9.2]: subscribed")
+    } else {
+      AppLog.device.info(
+        "Notifications [9.2]: refused (op=\(pkt.operator.rawValue)), continuing with polling")
     }
   }
 
   private func fetchDeviceMetadata() {
-    // Enable unsolicited STATUS pushes (Bose-app payload, blocks 0,1,2,4,5,9,16,18).
-    // Best-effort: without this the 700 applies SETGET writes but sends no reply.
     enableNotifications()
-    // Query Firmware Version [0.5]
-    if let resp = sendAndWait(
-      makeBMAPPacket(
-        fblock: BMAPFunctionBlock.deviceInfo, funcID: BMAPFunction.firmwareVersion,
-        op: BMAPOperator.get.rawValue))
+
+    if let pkt = query(BMAPFunctionBlock.deviceInfo, BMAPFunction.firmwareVersion),
+      pkt.operator == .status,
+      let str = String(bytes: pkt.payload, encoding: .utf8)
     {
-      if resp.count >= 4 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
-        let payload = Array(resp[4...])
-        if let str = String(bytes: payload, encoding: .utf8) {
-          metadata.firmwareVersion = str
-          AppLog.device.info("Firmware: \(str, privacy: .public)")
-        }
-      }
+      metadata.firmwareVersion = str
+      AppLog.device.info("Firmware: \(str, privacy: .public)")
     }
 
-    // Query Protocol Version [0.1]
-    if let resp = sendAndWait(
-      makeBMAPPacket(
-        fblock: BMAPFunctionBlock.deviceInfo, funcID: BMAPFunction.protocolVersion,
-        op: BMAPOperator.get.rawValue))
+    if let pkt = query(BMAPFunctionBlock.deviceInfo, BMAPFunction.protocolVersion),
+      pkt.operator == .status,
+      let str = String(bytes: pkt.payload, encoding: .utf8)
     {
-      if resp.count >= 4 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
-        let payload = Array(resp[4...])
-        if let str = String(bytes: payload, encoding: .utf8) {
-          metadata.protocolVersion = str
-          AppLog.device.info("Protocol: BMAP \(str, privacy: .public)")
-        }
-      }
+      metadata.protocolVersion = str
+      AppLog.device.info("Protocol: BMAP \(str, privacy: .public)")
     }
 
-    // Query Serial Number [0.7]
-    if let resp = sendAndWait(
-      makeBMAPPacket(
-        fblock: BMAPFunctionBlock.deviceInfo, funcID: BMAPFunction.serialNumber,
-        op: BMAPOperator.get.rawValue))
+    if let pkt = query(BMAPFunctionBlock.deviceInfo, BMAPFunction.serialNumber),
+      pkt.operator == .status,
+      let str = String(bytes: pkt.payload, encoding: .utf8)
     {
-      if resp.count >= 4 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
-        let payload = Array(resp[4...])
-        if let str = String(bytes: payload, encoding: .utf8) {
-          metadata.serialNumber = str
-          AppLog.device.info("Serial: \(str, privacy: .public)")
-        }
-      }
+      metadata.serialNumber = str
+      AppLog.device.info("Serial: \(str, privacy: .public)")
     }
 
-    // Query Device Name [1.2] (first payload byte is a flag, name starts at byte 1)
-    if let resp = sendAndWait(
-      makeBMAPPacket(
-        fblock: BMAPFunctionBlock.settings, funcID: BMAPFunction.productName,
-        op: BMAPOperator.get.rawValue))
+    if let pkt = query(BMAPFunctionBlock.settings, BMAPFunction.productName),
+      pkt.operator == .status, pkt.payload.count >= 1,
+      let str = String(bytes: Array(pkt.payload.dropFirst()), encoding: .utf8), !str.isEmpty
     {
-      if resp.count >= 5 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
-        let payload = Array(resp[5...])
-        if let str = String(bytes: payload, encoding: .utf8), !str.isEmpty {
-          metadata.deviceName = str
-          AppLog.device.info("Device name [1.2]: \(str, privacy: .public)")
-        }
-      }
+      metadata.deviceName = str
+      AppLog.device.info("Device name [1.2]: \(str, privacy: .public)")
     }
 
-    // Query Product GUID [0.12] (16 bytes, shown as 8-4-4-4-12)
-    if let resp = sendAndWait(
-      makeBMAPPacket(
-        fblock: BMAPFunctionBlock.deviceInfo, funcID: BMAPFunction.productGuid,
-        op: BMAPOperator.get.rawValue))
+    if let pkt = query(BMAPFunctionBlock.deviceInfo, BMAPFunction.productGuid),
+      pkt.operator == .status, pkt.payload.count >= 16,
+      let guid = formatGuid(Array(pkt.payload.prefix(16)))
     {
-      if resp.count >= 20 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
-        if let guid = formatGuid(Array(resp[4..<20])) {
-          metadata.productGuid = guid
-          AppLog.device.info("GUID [0.12]: \(guid, privacy: .public)")
-        }
-      }
+      metadata.productGuid = guid
+      AppLog.device.info("GUID [0.12]: \(guid, privacy: .public)")
     }
 
-    // Query reported codename [18.12] and platform [18.13] (read-only identification)
-    if let resp = sendAndWait(
-      makeBMAPPacket(
-        fblock: BMAPFunctionBlock.authentication, funcID: BMAPFunction.authCodename,
-        op: BMAPOperator.get.rawValue))
+    if let pkt = query(BMAPFunctionBlock.authentication, BMAPFunction.authCodename),
+      pkt.operator == .status,
+      let str = String(bytes: pkt.payload, encoding: .utf8), !str.isEmpty
     {
-      if resp.count >= 4 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
-        let payload = Array(resp[4...])
-        if let str = String(bytes: payload, encoding: .utf8), !str.isEmpty {
-          metadata.reportedCodename = str
-          AppLog.device.info("Codename [18.12]: \(str, privacy: .public)")
-        }
-      }
+      metadata.reportedCodename = str
+      AppLog.device.info("Codename [18.12]: \(str, privacy: .public)")
     }
-    if let resp = sendAndWait(
-      makeBMAPPacket(
-        fblock: BMAPFunctionBlock.authentication, funcID: BMAPFunction.authPlatform,
-        op: BMAPOperator.get.rawValue))
+
+    if let pkt = query(BMAPFunctionBlock.authentication, BMAPFunction.authPlatform),
+      pkt.operator == .status,
+      let str = String(bytes: pkt.payload, encoding: .utf8), !str.isEmpty
     {
-      if resp.count >= 4 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
-        let payload = Array(resp[4...])
-        if let str = String(bytes: payload, encoding: .utf8), !str.isEmpty {
-          metadata.platformName = str
-          AppLog.device.info("Platform [18.13]: \(str, privacy: .public)")
-        }
-      }
+      metadata.platformName = str
+      AppLog.device.info("Platform [18.13]: \(str, privacy: .public)")
     }
   }
 
-  public func refreshState() {
-    perform(#selector(doRefreshState), on: btThread!, with: nil, waitUntilDone: false)
-  }
-
-  @objc private func doRefreshState() {
+  @objc func doRefreshState() {
     guard channel != nil else { return }
+
+    var snapshot = BoseStateSnapshot(
+      isConnected: isConnected,
+      deviceName: deviceName,
+      usesDirectCNC: usesDirectCNC,
+      hasEqualizer: hasEqualizer
+    )
 
     // 1. Noise Mode / CNC [1.5] or [31.3]
     if usesDirectCNC {
-      if let resp = sendAndWait(
-        makeBMAPPacket(
-          fblock: BMAPFunctionBlock.settings, funcID: BMAPFunction.cnc,
-          op: BMAPOperator.get.rawValue))
+      if let pkt = query(BMAPFunctionBlock.settings, BMAPFunction.cnc),
+        pkt.operator == .status, pkt.payload.count >= 2
       {
-        if resp.count >= 6 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
-          let step = resp[5]
-          cncLevel = step
-          if Date().timeIntervalSince(lastModeChangeTime) >= 1.5 {
-            if step == 0 {
-              currentMode = .quiet
-            } else if step == 10 {
-              currentMode = .aware
-            } else {
-              currentMode = nil
-            }
-          }
-          AppLog.device.debug(
-            "CNC step \(step) -> \(self.currentMode?.label ?? "Level \(step)")")
+        let step = pkt.payload[1]
+        cncLevel = step
+        snapshot.cncLevel = step
+        if Date().timeIntervalSince(lastModeChangeTime) >= 1.5 {
+          currentMode = step == 0 ? .quiet : (step == 10 ? .aware : nil)
+          snapshot.currentMode = .some(currentMode)
         }
+        AppLog.device.debug(
+          "CNC step \(step) -> \(self.currentMode?.label ?? "Level \(step)")")
       }
     } else {
-      if let resp = sendAndWait(
-        makeBMAPPacket(
-          fblock: BMAPFunctionBlock.audioModes, funcID: BMAPFunction.currentMode,
-          op: BMAPOperator.get.rawValue))
+      if let pkt = query(BMAPFunctionBlock.audioModes, BMAPFunction.currentMode),
+        pkt.operator == .status, let first = pkt.payload.first,
+        Date().timeIntervalSince(lastModeChangeTime) >= 1.5,
+        let mode = NoiseMode(rawValue: first)
       {
-        if resp.count >= 5 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
-          if Date().timeIntervalSince(lastModeChangeTime) >= 1.5 {
-            if let mode = NoiseMode(rawValue: resp[4]) { currentMode = mode }
-          }
-        }
+        currentMode = mode
+        snapshot.currentMode = .some(mode)
       }
     }
 
     // 2. Battery [2.2]
-    if let resp = sendAndWait(
-      makeBMAPPacket(
-        fblock: BMAPFunctionBlock.battery, funcID: BMAPFunction.batteryLevel,
-        op: BMAPOperator.get.rawValue))
+    if let pkt = query(BMAPFunctionBlock.battery, BMAPFunction.batteryLevel),
+      pkt.operator == .status, !pkt.payload.isEmpty
     {
-      if resp.count >= 5 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
-        let payload = Array(resp[4...])
-        if payload.count == 4 && payload[3] == 0 {
-          batteryInfo = BatteryInfo(single: Int(payload[0]))
-        } else {
-          var l: Int? = nil
-          var r: Int? = nil
-          var c: Int? = nil
-          var i = 0
-          while i + 3 < payload.count {
-            let level = Int(payload[i])
-            let devId = payload[i + 3]
-            switch devId {
-            case 1: l = level
-            case 2: r = level
-            case 3, 4: c = level
-            default: break
-            }
-            i += 4
+      let payload = pkt.payload
+      if payload.count == 4 && payload[3] == 0 {
+        snapshot.batteryInfo = BatteryInfo(single: Int(payload[0]))
+      } else {
+        var l: Int? = nil
+        var r: Int? = nil
+        var c: Int? = nil
+        var i = 0
+        while i + 3 < payload.count {
+          let level = Int(payload[i])
+          switch payload[i + 3] {
+          case 1: l = level
+          case 2: r = level
+          case 3, 4: c = level
+          default: break
           }
-          batteryInfo = BatteryInfo(single: nil, left: l, right: r, caseLevel: c)
+          i += 4
         }
+        snapshot.batteryInfo = BatteryInfo(single: nil, left: l, right: r, caseLevel: c)
       }
     }
 
     // 3. Equalizer [1.7]
     if hasEqualizer {
-      if let resp = sendAndWait(
-        makeBMAPPacket(
-          fblock: BMAPFunctionBlock.settings, funcID: BMAPFunction.equalizer,
-          op: BMAPOperator.get.rawValue))
+      if let pkt = query(BMAPFunctionBlock.settings, BMAPFunction.equalizer),
+        pkt.operator == .status
       {
-        if resp.count >= 4 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
-          let payload = Array(resp[4...])
-          var b = equalizer.bass
-          var m = equalizer.mid
-          var t = equalizer.treble
-          var i = 0
-          while i + 3 < payload.count {
-            let curRaw = payload[i + 2]
-            let curVal = curRaw < 128 ? Int(curRaw) : Int(curRaw) - 256
-            let bandId = payload[i + 3]
-            switch bandId {
-            case EqBand.bassId: b = curVal
-            case EqBand.midId: m = curVal
-            case EqBand.trebleId: t = curVal
-            default: break
-            }
-            i += 4
+        let payload = pkt.payload
+        var b = equalizer.bass
+        var m = equalizer.mid
+        var t = equalizer.treble
+        var i = 0
+        while i + 3 < payload.count {
+          let curRaw = payload[i + 2]
+          let curVal = curRaw < 128 ? Int(curRaw) : Int(curRaw) - 256
+          switch payload[i + 3] {
+          case EqBand.bassId: b = curVal
+          case EqBand.midId: m = curVal
+          case EqBand.trebleId: t = curVal
+          default: break
           }
-          equalizer = EqualizerSettings(bass: b, mid: m, treble: t)
+          i += 4
         }
+        equalizer = EqualizerSettings(bass: b, mid: m, treble: t)
+        snapshot.equalizer = equalizer
       }
     }
 
     // 4. Sidetone [1.11]
-    if let resp = sendAndWait(
-      makeBMAPPacket(
-        fblock: BMAPFunctionBlock.settings, funcID: BMAPFunction.sidetone,
-        op: BMAPOperator.get.rawValue))
+    if let pkt = query(BMAPFunctionBlock.settings, BMAPFunction.sidetone),
+      pkt.operator == .status, pkt.payload.count >= 2,
+      let lvl = SidetoneLevel(rawValue: pkt.payload[1])
     {
-      if resp.count >= 6 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
-        let rawLevel = resp[5]
-        if let lvl = SidetoneLevel(rawValue: rawLevel) {
-          sidetone = lvl
-        }
-      }
+      sidetone = lvl
+      snapshot.sidetone = lvl
     }
 
     // 5. Voice Prompts [1.3]
-    if let resp = sendAndWait(
-      makeBMAPPacket(
-        fblock: BMAPFunctionBlock.settings, funcID: BMAPFunction.voicePrompts,
-        op: BMAPOperator.get.rawValue))
+    if let pkt = query(BMAPFunctionBlock.settings, BMAPFunction.voicePrompts),
+      pkt.operator == .status, let first = pkt.payload.first
     {
-      if resp.count >= 5 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
-        let first = resp[4]
-        voicePromptsEnabled = ((first >> 5) & 1) == 1
-        voiceLanguageId = first & 0x1F
-      }
+      voicePromptsEnabled = ((first >> 5) & 1) == 1
+      voiceLanguageId = first & 0x1F
+      snapshot.voicePromptsEnabled = voicePromptsEnabled
     }
 
     // 6. Multipoint [1.10]
-    if let resp = sendAndWait(
-      makeBMAPPacket(
-        fblock: BMAPFunctionBlock.settings, funcID: BMAPFunction.multipoint,
-        op: BMAPOperator.get.rawValue))
+    if let pkt = query(BMAPFunctionBlock.settings, BMAPFunction.multipoint),
+      pkt.operator == .status, let first = pkt.payload.first
     {
-      if resp.count >= 5 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
-        multipointEnabled = resp[4] != 0
-      }
+      multipointEnabled = first != 0
+      snapshot.multipointEnabled = multipointEnabled
     }
 
-    // 6c. Motion Auto-off [1.20] (read-only: unauthenticated SETGET writes
-    // are refused with InvalidData; the Bose app toggles it authenticated)
-    if let resp = sendAndWait(
-      makeBMAPPacket(
-        fblock: BMAPFunctionBlock.settings, funcID: BMAPFunction.motionAutoOff,
-        op: BMAPOperator.get.rawValue))
+    // 6c. Motion Auto-off [1.20]
+    if let pkt = query(BMAPFunctionBlock.settings, BMAPFunction.motionAutoOff),
+      pkt.operator == .status, let raw = pkt.payload.first
     {
-      if resp.count >= 5 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
-        let raw = resp[4]
-        if (raw != 0) != self.motionAutoOffEnabled {
-          self.motionAutoOffEnabled = raw != 0
-          AppLog.device.info("Motion auto-off [1.20]: \(raw)")
-        }
+      if (raw != 0) != motionAutoOffEnabled {
+        motionAutoOffEnabled = raw != 0
+        AppLog.device.info("Motion auto-off [1.20]: \(raw)")
+      }
+      snapshot.motionAutoOffEnabled = motionAutoOffEnabled
+    }
+
+    // 6b. Standby Timer [1.4]
+    if let pkt = query(BMAPFunctionBlock.settings, BMAPFunction.standbyTimer),
+      pkt.operator == .status, let raw = pkt.payload.first
+    {
+      if metadata.standbyTimer != raw {
+        metadata.standbyTimer = raw
+        AppLog.device.info("Standby timer [1.4]: \(raw)")
       }
     }
-    // 6b. Standby Timer [1.4] (writable via SETGET, verified on hardware)
-    if let resp = sendAndWait(
-      makeBMAPPacket(
-        fblock: BMAPFunctionBlock.settings, funcID: BMAPFunction.standbyTimer,
-        op: BMAPOperator.get.rawValue))
-    {
-      if resp.count >= 5 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
-        let raw = resp[4]
-        if metadata.standbyTimer != raw {
-          metadata.standbyTimer = raw
-          AppLog.device.info("Standby timer [1.4]: \(raw)")
-        }
-      }
-    }
+    snapshot.metadata = metadata
 
     // 7. Shortcut Button [1.9]
-    if let resp = sendAndWait(
-      makeBMAPPacket(
-        fblock: BMAPFunctionBlock.settings, funcID: BMAPFunction.buttons,
-        op: BMAPOperator.get.rawValue))
+    if let pkt = query(BMAPFunctionBlock.settings, BMAPFunction.buttons),
+      pkt.operator == .status, pkt.payload.count >= 3,
+      let act = ShortcutAction(rawValue: pkt.payload[2])
     {
-      if resp.count >= 7 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
-        let actRaw = resp[6]
-        if let act = ShortcutAction(rawValue: actRaw) {
-          shortcutAction = act
-        }
-      }
+      shortcutAction = act
+      snapshot.shortcutAction = act
     }
 
     // 8. CNC Favorites [1.15]
     if usesDirectCNC {
-      if let resp = sendAndWait(
-        makeBMAPPacket(
-          fblock: BMAPFunctionBlock.settings, funcID: BMAPFunction.cncFavorites,
-          op: BMAPOperator.get.rawValue))
+      if let pkt = query(BMAPFunctionBlock.settings, BMAPFunction.cncFavorites),
+        pkt.operator == .status, pkt.payload.count >= 4
       {
-        if resp.count >= 8 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
-          let actIdx = Int(resp[4])
-          let p0 = Int(resp[5])
-          let p1 = Int(resp[6])
-          let p2 = Int(resp[7])
-          cncFavorites = CncFavorites(activeIndex: actIdx, preset0: p0, preset1: p1, preset2: p2)
-        }
+        cncFavorites = CncFavorites(
+          activeIndex: Int(pkt.payload[0]), preset0: Int(pkt.payload[1]),
+          preset1: Int(pkt.payload[2]), preset2: Int(pkt.payload[3]))
+        snapshot.cncFavorites = cncFavorites
       }
     }
 
     // 9. Local MAC Address [4.9]
     if localMacAddressString == nil {
-      if let resp = sendAndWait(
-        makeBMAPPacket(
-          fblock: BMAPFunctionBlock.deviceManagement, funcID: BMAPFunction.localMacAddress,
-          op: BMAPOperator.get.rawValue))
+      if let pkt = query(BMAPFunctionBlock.deviceManagement, BMAPFunction.localMacAddress),
+        pkt.operator == .status, pkt.payload.count >= 6
       {
-        if resp.count >= 10 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
-          let macBytes = Array(resp[4..<10])
-          localMacAddressString = macBytes.map { String(format: "%02x", $0) }.joined(separator: ":")
-        }
+        localMacAddressString = pkt.payload.prefix(6).map { String(format: "%02x", $0) }.joined(
+          separator: ":")
       }
     }
 
     // 10. Active Audio Source [5.1]
-    if let resp = sendAndWait(
-      makeBMAPPacket(
-        fblock: BMAPFunctionBlock.audioManagement, funcID: BMAPFunction.audioSource,
-        op: BMAPOperator.get.rawValue))
+    if let pkt = query(BMAPFunctionBlock.audioManagement, BMAPFunction.audioSource),
+      pkt.operator == .status, pkt.payload.count >= 9
     {
-      if resp.count >= 13 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
-        let activeMacBytes = Array(resp[7..<13])
-        activeSourceMac = activeMacBytes.map { String(format: "%02x", $0) }.joined(separator: ":")
-      }
+      activeSourceMac = pkt.payload[3..<9].map { String(format: "%02x", $0) }.joined(
+        separator: ":")
+      snapshot.activeSourceMac = .some(activeSourceMac)
     }
 
-    // 11. Connected Devices [4.4] — full paired list
-    if let resp = sendAndWait(
-      makeBMAPPacket(
-        fblock: BMAPFunctionBlock.deviceManagement, funcID: BMAPFunction.listDevices,
-        op: BMAPOperator.get.rawValue))
+    // 11. Connected Devices [4.4]
+    if let pkt = query(BMAPFunctionBlock.deviceManagement, BMAPFunction.listDevices),
+      pkt.operator == .status, pkt.payload.count >= 7
     {
-      if resp.count >= 11 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
-        let connMask = resp[4]
-        var offset = 5
-        var slot = 0
-        var foundSecond: ConnectedDevice? = nil
-        var foundLocal: ConnectedDevice? = nil
-        var all: [ConnectedDevice] = []
-        while offset + 6 <= resp.count {
-          let macBytes = Array(resp[offset..<(offset + 6)])
-          let macStr = macBytes.map { String(format: "%02x", $0) }.joined(separator: ":")
-          let isConn = (connMask & (1 << slot)) != 0
-          let isLocal = (macStr == localMacAddressString)
-          let isActive = (macStr == activeSourceMac)
+      let connMask = pkt.payload[0]
+      var offset = 1
+      var slot = 0
+      var foundSecond: ConnectedDevice? = nil
+      var foundLocal: ConnectedDevice? = nil
+      var all: [ConnectedDevice] = []
+      while offset + 6 <= pkt.payload.count {
+        let macBytes = Array(pkt.payload[offset..<(offset + 6)])
+        let macStr = macBytes.map { String(format: "%02x", $0) }.joined(separator: ":")
+        let isConn = (connMask & (1 << slot)) != 0
+        let isLocal = (macStr == localMacAddressString)
+        let isActive = (macStr == activeSourceMac)
 
-          // Resolve names only for connected devices; for disconnected ones
-          // try once per session (cached after) so idle polls stay fast.
-          var devName =
-            knownDeviceNames[macStr] ?? (isLocal ? "MacBook Pro" : "Bluetooth Device")
-          if isConn {
-            if let nameResp = sendAndWait(
-              makeBMAPPacket(
-                fblock: BMAPFunctionBlock.deviceManagement, funcID: BMAPFunction.peerDeviceInfo,
-                op: BMAPOperator.get.rawValue, payload: macBytes))
-            {
-              if nameResp.count > 13 {
-                let nameData = Array(nameResp[13...])
-                if let str = String(bytes: nameData, encoding: .utf8), !str.isEmpty {
-                  devName = str
-                  knownDeviceNames[macStr] = str
-                }
-              }
-            }
-          } else if knownDeviceNames[macStr] == nil
-            && !nameLookupAttempted.contains(macStr)
+        var devName =
+          knownDeviceNames[macStr] ?? (isLocal ? "MacBook Pro" : "Bluetooth Device")
+        let shouldLookup =
+          isConn
+          || (knownDeviceNames[macStr] == nil && !nameLookupAttempted.contains(macStr))
+        if shouldLookup {
+          if !isConn { nameLookupAttempted.insert(macStr) }
+          if let namePkt = query(
+            BMAPFunctionBlock.deviceManagement, BMAPFunction.peerDeviceInfo, payload: macBytes),
+            namePkt.payload.count > 9,
+            let str = String(bytes: Array(namePkt.payload[9...]), encoding: .utf8), !str.isEmpty
           {
-            nameLookupAttempted.insert(macStr)
-            if let nameResp = sendAndWait(
-              makeBMAPPacket(
-                fblock: BMAPFunctionBlock.deviceManagement, funcID: BMAPFunction.peerDeviceInfo,
-                op: BMAPOperator.get.rawValue, payload: macBytes))
-            {
-              if nameResp.count > 13 {
-                let nameData = Array(nameResp[13...])
-                if let str = String(bytes: nameData, encoding: .utf8), !str.isEmpty {
-                  devName = str
-                  knownDeviceNames[macStr] = str
-                }
-              }
-            }
+            devName = str
+            knownDeviceNames[macStr] = str
           }
-
-          let dev = ConnectedDevice(
-            macAddress: macStr, name: devName, isConnected: isConn, isLocalHost: isLocal,
-            isActiveAudioSource: isActive)
-          all.append(dev)
-          if isLocal {
-            foundLocal = dev
-          } else if isConn && foundSecond == nil {
-            foundSecond = dev
-          }
-
-          offset += 6
-          slot += 1
         }
-        pairedDevices = all
-        secondDevice = foundSecond
-        localDevice = foundLocal
+
+        let dev = ConnectedDevice(
+          macAddress: macStr, name: devName, isConnected: isConn, isLocalHost: isLocal,
+          isActiveAudioSource: isActive)
+        all.append(dev)
+        if isLocal {
+          foundLocal = dev
+        } else if isConn && foundSecond == nil {
+          foundSecond = dev
+        }
+
+        offset += 6
+        slot += 1
       }
+      snapshot.pairedDevices = all
+      snapshot.secondDevice = .some(foundSecond)
+      snapshot.localDevice = .some(foundLocal)
     }
 
     // 12. Volume Level [5.5]
-    if let resp = sendAndWait(
-      makeBMAPPacket(
-        fblock: BMAPFunctionBlock.audioManagement, funcID: BMAPFunction.volume,
-        op: BMAPOperator.get.rawValue))
+    if let pkt = query(BMAPFunctionBlock.audioManagement, BMAPFunction.volume),
+      pkt.operator == .status, pkt.payload.count >= 2
     {
-      if resp.count >= 6 && resp[2] & 0x0F == BMAPOperator.status.rawValue {
-        let maxVol = resp[4]
-        let curVol = resp[5]
-        volumeInfo = VolumeInfo(current: curVol, max: maxVol)
-      }
+      volumeInfo = VolumeInfo(current: pkt.payload[1], max: pkt.payload[0])
+      snapshot.volumeInfo = volumeInfo
     }
 
-    DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+    onSnapshot?(snapshot)
   }
 
-  // MARK: - Control Actions
+  // MARK: - Control Executors (btThread)
 
-  public func setMode(_ mode: NoiseMode) {
-    currentMode = mode
+  @objc func doSetMode(_ num: NSNumber) {
+    guard let mode = NoiseMode(rawValue: num.uint8Value) else { return }
     lastModeChangeTime = Date()
-    DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
-    pendingMode = mode
-    perform(#selector(doSetMode), on: btThread!, with: nil, waitUntilDone: false)
-  }
-
-  @objc private func doSetMode() {
-    let mode = pendingMode
+    currentMode = mode
     AppLog.device.info("setMode: \(mode.label, privacy: .public)")
     if usesDirectCNC {
       let step: UInt8 = (mode == .quiet) ? 0 : 10
@@ -675,38 +865,22 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
           op: BMAPOperator.setGet.rawValue, payload: [step, 0x01]))
       AppLog.device.info("✅ CNC switched to \(step) (\(mode.label, privacy: .public))")
     } else {
-      let resp = sendAndWait(
-        makeBMAPPacket(
-          fblock: BMAPFunctionBlock.audioModes, funcID: BMAPFunction.currentMode,
-          op: BMAPOperator.start.rawValue, payload: [mode.rawValue, 0x00]))
-      if let r = resp, r.count >= 5 && r[2] & 0x0F == BMAPOperator.result.rawValue {
+      let pkt = query(
+        BMAPFunctionBlock.audioModes, BMAPFunction.currentMode,
+        op: .start, payload: [mode.rawValue, 0x00])
+      if let pkt, pkt.operator == .result, !pkt.payload.isEmpty {
         AppLog.device.info("✅ Mode switched")
       } else {
         AppLog.device.error("❌ Mode switch failed")
       }
     }
-    DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+    onSnapshot?(BoseStateSnapshot(currentMode: .some(currentMode), cncLevel: cncLevel))
   }
 
-  public func setCNCLevel(_ step: UInt8) {
-    let clamped = max(0, min(10, step))
-    cncLevel = clamped
-    if clamped == 0 {
-      currentMode = .quiet
-    } else if clamped == 10 {
-      currentMode = .aware
-    } else {
-      currentMode = nil
-    }
-    lastModeChangeTime = Date()
-    DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
-
-    perform(
-      #selector(doSetCNC(_:)), on: btThread!, with: NSNumber(value: clamped), waitUntilDone: false)
-  }
-
-  @objc private func doSetCNC(_ num: NSNumber) {
+  @objc func doSetCNC(_ num: NSNumber) {
     let step = num.uint8Value
+    lastModeChangeTime = Date()
+    cncLevel = step
     AppLog.device.info("setCNCLevel: \(step)")
     sendRawPacket(
       makeBMAPPacket(
@@ -714,25 +888,10 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
         op: BMAPOperator.setGet.rawValue, payload: [step, 0x01]))
   }
 
-  public func setEqualizerBand(id: UInt8, level: Int) {
-    let clamped = max(-10, min(10, level))
-    switch id {
-    case EqBand.bassId: equalizer.bass = clamped
-    case EqBand.midId: equalizer.mid = clamped
-    case EqBand.trebleId: equalizer.treble = clamped
-    default: break
-    }
-    DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
-
-    perform(
-      #selector(doSetEQBand(_:)), on: btThread!,
-      with: [id, UInt8(clamped < 0 ? clamped + 256 : clamped)], waitUntilDone: false)
-  }
-
-  @objc private func doSetEQBand(_ args: [UInt8]) {
-    guard args.count >= 2 else { return }
-    let bandId = args[0]
-    let val = args[1]
+  @objc func doSetEQBand(_ args: NSArray) {
+    guard args.count >= 2, let bandId = (args[0] as? NSNumber)?.uint8Value,
+      let val = (args[1] as? NSNumber)?.uint8Value
+    else { return }
     AppLog.device.info("setEQBand: band=\(bandId), val=\(val)")
     sendRawPacket(
       makeBMAPPacket(
@@ -740,15 +899,7 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
         op: BMAPOperator.setGet.rawValue, payload: [val, bandId]))
   }
 
-  public func setSidetone(_ level: SidetoneLevel) {
-    sidetone = level
-    DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
-    perform(
-      #selector(doSetSidetone(_:)), on: btThread!, with: NSNumber(value: level.rawValue),
-      waitUntilDone: false)
-  }
-
-  @objc private func doSetSidetone(_ num: NSNumber) {
+  @objc func doSetSidetone(_ num: NSNumber) {
     let val = num.uint8Value
     AppLog.device.info("setSidetone: \(val)")
     sendRawPacket(
@@ -757,43 +908,21 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
         op: BMAPOperator.setGet.rawValue, payload: [0x01, val]))
   }
 
-  public func setVoicePrompts(enabled: Bool) {
-    voicePromptsEnabled = enabled
-    DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
-    perform(
-      #selector(doSetVoicePrompts(_:)), on: btThread!, with: NSNumber(value: enabled),
-      waitUntilDone: false)
-  }
-
-  /// Sets the auto-off timer (minutes) via SETGET [1.4]. 0x00 = Never.
-  /// Verified on hardware: SETGET is accepted (STATUS echo), unlike SET/START.
-  public func setStandbyTimer(_ minutes: UInt8) {
-    metadata.standbyTimer = minutes
-    DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
-    perform(
-      #selector(doSetStandbyTimer(_:)), on: btThread!, with: NSNumber(value: minutes),
-      waitUntilDone: false)
-  }
-
-  @objc private func doSetStandbyTimer(_ num: NSNumber) {
+  @objc func doSetStandbyTimer(_ num: NSNumber) {
     let val = num.uint8Value
     AppLog.device.info("setStandbyTimer: \(val)")
     guard
-      let resp = sendAndWait(
-        makeBMAPPacket(
-          fblock: BMAPFunctionBlock.settings, funcID: BMAPFunction.standbyTimer,
-          op: BMAPOperator.setGet.rawValue, payload: [val]),
-        timeout: 2.0)
+      let pkt = query(
+        BMAPFunctionBlock.settings, BMAPFunction.standbyTimer,
+        op: .setGet, payload: [val], timeout: 2.0)
     else {
       AppLog.device.info("setStandbyTimer: no reply, will correct on refresh")
       return
     }
-    if resp.count >= 4 {
-      AppLog.device.info("setStandbyTimer: reply op=\(resp[2] & 0x0F)")
-    }
+    AppLog.device.info("setStandbyTimer: reply op=\(pkt.operator.rawValue)")
   }
 
-  @objc private func doSetVoicePrompts(_ num: NSNumber) {
+  @objc func doSetVoicePrompts(_ num: NSNumber) {
     let en = num.boolValue
     let payloadByte = (en ? 0x20 : 0x00) | (voiceLanguageId & 0x1F)
     AppLog.device.info("setVoicePrompts: enabled=\(en)")
@@ -803,15 +932,7 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
         op: BMAPOperator.setGet.rawValue, payload: [payloadByte]))
   }
 
-  public func setMultipoint(enabled: Bool) {
-    multipointEnabled = enabled
-    DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
-    perform(
-      #selector(doSetMultipoint(_:)), on: btThread!, with: NSNumber(value: enabled),
-      waitUntilDone: false)
-  }
-
-  @objc private func doSetMultipoint(_ num: NSNumber) {
+  @objc func doSetMultipoint(_ num: NSNumber) {
     let en = num.boolValue
     AppLog.device.info("setMultipoint: \(en)")
     sendRawPacket(
@@ -820,156 +941,58 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
         op: BMAPOperator.setGet.rawValue, payload: [en ? 0x01 : 0x00]))
   }
 
-  public func setShortcutAction(_ action: ShortcutAction) {
-    shortcutAction = action
-    DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
-    perform(
-      #selector(doSetShortcut(_:)), on: btThread!, with: NSNumber(value: action.rawValue),
-      waitUntilDone: false)
-  }
-
-  @objc private func doSetShortcut(_ num: NSNumber) {
+  @objc func doSetShortcut(_ num: NSNumber) {
     let act = num.uint8Value
     AppLog.device.info("setShortcutAction: \(act)")
-    // button_id 0x80 (Shortcut touch surface), event 0x05 (press and hold)
     sendRawPacket(
       makeBMAPPacket(
         fblock: BMAPFunctionBlock.settings, funcID: BMAPFunction.buttons,
         op: BMAPOperator.setGet.rawValue, payload: [0x80, 0x05, act]))
   }
 
-  public func setCncFavorites(preset0: Int, preset1: Int, preset2: Int) {
-    let p0 = UInt8(clamping: preset0)
-    let p1 = UInt8(clamping: preset1)
-    let p2 = UInt8(clamping: preset2)
-    let curIdx = UInt8(cncFavorites.activeIndex)
-    cncFavorites.preset0 = Int(p0)
-    cncFavorites.preset1 = Int(p1)
-    cncFavorites.preset2 = Int(p2)
-    DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
-    perform(
-      #selector(doSetCncFavorites(_:)), on: btThread!, with: [curIdx, p0, p1, p2],
-      waitUntilDone: false)
-  }
-
-  public func selectCncFavorite(index: Int) {
-    let idx = UInt8(index % 3)
-    let p0 = UInt8(cncFavorites.preset0)
-    let p1 = UInt8(cncFavorites.preset1)
-    let p2 = UInt8(cncFavorites.preset2)
-    cncFavorites.activeIndex = Int(idx)
-    let targetLevel = idx == 0 ? p0 : (idx == 1 ? p1 : p2)
-    cncLevel = targetLevel
-    if targetLevel == 0 {
-      currentMode = .quiet
-    } else if targetLevel == 10 {
-      currentMode = .aware
-    } else {
-      currentMode = nil
-    }
+  @objc func doSetCncFavorites(_ arr: NSArray) {
+    let bytes = arr.compactMap { ($0 as? NSNumber)?.uint8Value }
+    guard bytes.count == 4 else { return }
     lastModeChangeTime = Date()
-    DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
-    perform(
-      #selector(doSetCncFavorites(_:)), on: btThread!, with: [idx, p0, p1, p2], waitUntilDone: false
-    )
-  }
-
-  @objc private func doSetCncFavorites(_ arr: [UInt8]) {
-    guard arr.count == 4 else { return }
-    AppLog.device.info("setCncFavorites: idx=\(arr[0]) p0=\(arr[1]) p1=\(arr[2]) p2=\(arr[3])")
+    AppLog.device.info(
+      "setCncFavorites: idx=\(bytes[0]) p0=\(bytes[1]) p1=\(bytes[2]) p2=\(bytes[3])")
     sendRawPacket(
       makeBMAPPacket(
         fblock: BMAPFunctionBlock.settings, funcID: BMAPFunction.cncFavorites,
-        op: BMAPOperator.setGet.rawValue, payload: arr))
+        op: BMAPOperator.setGet.rawValue, payload: bytes))
   }
 
-  // MARK: - Remote Media Transport Controls
-
-  public func sendRemotePlay() {
+  @objc func doSendRemotePlay() {
     AppLog.device.info("sendRemotePlay")
     sendRawPacket(
       makeBMAPPacket(
         fblock: BMAPFunctionBlock.audioManagement, funcID: BMAPFunction.audioControl,
         op: BMAPOperator.start.rawValue, payload: [0x01]))
-    isRemotePlaying = true
-    DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
   }
 
-  public func sendRemotePause() {
+  @objc func doSendRemotePause() {
     AppLog.device.info("sendRemotePause")
     sendRawPacket(
       makeBMAPPacket(
         fblock: BMAPFunctionBlock.audioManagement, funcID: BMAPFunction.audioControl,
         op: BMAPOperator.start.rawValue, payload: [0x02]))
-    isRemotePlaying = false
-    DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
   }
 
-  public func toggleRemotePlayback() {
-    if isRemotePlaying {
-      sendRemotePause()
-    } else {
-      sendRemotePlay()
-    }
-  }
-
-  /// Asks the headphones to connect (and route audio) to a paired device.
-  /// Async: the ack is PROCESSING; success is silent, failure arrives later
-  /// as an ERROR. The 3s poll picks up the result.
-  public func connectPairedDevice(mac: String) {
-    guard let payload = buildConnectPayload(mac: mac) else {
-      AppLog.device.error("connectPairedDevice: malformed MAC \(mac, privacy: .public)")
-      return
-    }
-    AppLog.device.info("connectPairedDevice → \(mac, privacy: .public)")
-    perform(
-      #selector(doConnectPairedDevice(_:)), on: btThread!, with: payload,
-      waitUntilDone: false)
-  }
-
-  @objc private func doConnectPairedDevice(_ payload: [UInt8]) {
+  @objc func doConnectPairedDevice(_ arr: NSArray) {
+    let payload = arr.compactMap { ($0 as? NSNumber)?.uint8Value }
     guard
-      let resp = sendAndWait(
-        makeBMAPPacket(
-          fblock: BMAPFunctionBlock.deviceManagement, funcID: BMAPFunction.connectDevice,
-          op: BMAPOperator.start.rawValue, payload: payload),
-        timeout: 5.0)
+      let pkt = query(
+        BMAPFunctionBlock.deviceManagement, BMAPFunction.connectDevice,
+        op: .start, payload: payload, timeout: 5.0)
     else {
       AppLog.device.error("connectPairedDevice: no reply (will retry via poll)")
       return
     }
-    if resp.count >= 4 {
-      let op = resp[2] & 0x0F
-      // PROCESSING (7) = accepted, async. RESULT (6) = done. ERROR (4) = refused.
-      AppLog.device.info("connectPairedDevice: reply op=\(op)")
-    }
-    DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+    AppLog.device.info("connectPairedDevice: reply op=\(pkt.operator.rawValue)")
+    onSnapshot?(BoseStateSnapshot())
   }
 
-  // MARK: - Remote Volume Controls
-
-  public func setVolume(_ level: UInt8) {
-    let clamped = min(max(level, 0), volumeInfo.max)
-    volumeInfo.current = clamped
-    DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
-    perform(
-      #selector(doSetVolume(_:)), on: btThread!, with: NSNumber(value: clamped),
-      waitUntilDone: false)
-  }
-
-  public func volumeUp() {
-    if volumeInfo.current < volumeInfo.max {
-      setVolume(volumeInfo.current + 1)
-    }
-  }
-
-  public func volumeDown() {
-    if volumeInfo.current > 0 {
-      setVolume(volumeInfo.current - 1)
-    }
-  }
-
-  @objc private func doSetVolume(_ num: NSNumber) {
+  @objc func doSetVolume(_ num: NSNumber) {
     let lvl = num.uint8Value
     AppLog.device.info("setVolume: \(lvl)")
     sendRawPacket(
@@ -986,14 +1009,24 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
     }
   }
 
-  private func sendAndWait(_ packet: [UInt8], timeout: TimeInterval = 1.0) -> [UInt8]? {
+  private func query(
+    _ fblock: UInt8, _ funcID: UInt8, op: BMAPOperator = .get, payload: [UInt8] = [],
+    timeout: TimeInterval = 1.0
+  ) -> BMAPPacket? {
     guard let channel = channel else { return nil }
-    responseData = []
+    expectedFBlock = fblock
+    expectedFuncID = funcID
+    responsePacket = nil
     responseReceived = false
+    defer {
+      expectedFBlock = nil
+      expectedFuncID = nil
+    }
 
-    var pkt = packet
+    var pkt = BMAPPacket(functionBlock: fblock, functionID: funcID, operator: op, payload: payload)
+      .rawBytes
     let writeOK = pkt.withUnsafeMutableBufferPointer { buf -> Bool in
-      return channel.writeSync(buf.baseAddress!, length: UInt16(buf.count)) == kIOReturnSuccess
+      channel.writeSync(buf.baseAddress!, length: UInt16(buf.count)) == kIOReturnSuccess
     }
     guard writeOK else {
       AppLog.protocol.error("BMAP write failed")
@@ -1004,12 +1037,12 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
     while Date() < deadline && !responseReceived {
       RunLoop.current.run(until: Date().addingTimeInterval(0.02))
     }
-    return responseReceived ? responseData : nil
+    return responseReceived ? responsePacket : nil
   }
 
-  // MARK: - RFCOMM Delegate
+  // MARK: - IOBluetoothRFCOMMChannelDelegate
 
-  public func rfcommChannelData(
+  func rfcommChannelData(
     _ rfcommChannel: IOBluetoothRFCOMMChannel!, data ptr: UnsafeMutableRawPointer!, length len: Int
   ) {
     let bytes = Array(
@@ -1018,129 +1051,109 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
       "RX(\(len, privacy: .public)): \(bytes.prefix(20).map { String(format: "%02x", $0) }.joined(separator: " "), privacy: .public)"
     )
 
-    // Unsolicited mode change [31.3]
-    if bytes.count >= 5 && bytes[0] == BMAPFunctionBlock.audioModes
-      && bytes[1] == BMAPFunction.currentMode && bytes[2] & 0x0F == BMAPOperator.status.rawValue
-    {
-      if let mode = NoiseMode(rawValue: bytes[4]) {
-        if mode != currentMode {
+    guard let packet = BMAPPacket.parse(bytes) else { return }
+
+    var snapshot: BoseStateSnapshot?
+    if packet.operator == .status {
+      switch (packet.functionBlock, packet.functionID) {
+      case (BMAPFunctionBlock.audioModes, BMAPFunction.currentMode):
+        if let raw = packet.payload.first, let mode = NoiseMode(rawValue: raw),
+          mode != currentMode
+        {
           AppLog.device.info("📡 Unsolicited mode change: \(mode.label, privacy: .public)")
           currentMode = mode
-          DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+          snapshot = snapshot ?? BoseStateSnapshot()
+          snapshot?.currentMode = .some(mode)
         }
-      }
-    }
 
-    // Unsolicited CNC change [1.5]
-    if bytes.count >= 6 && bytes[0] == BMAPFunctionBlock.settings && bytes[1] == BMAPFunction.cnc
-      && bytes[2] & 0x0F == BMAPOperator.status.rawValue
-    {
-      let step = bytes[5]
-      let stepChanged = (step != cncLevel)
-      cncLevel = step
-      if Date().timeIntervalSince(lastModeChangeTime) >= 1.5 {
-        let newMode: NoiseMode?
-        if step == 0 {
-          newMode = .quiet
-        } else if step == 10 {
-          newMode = .aware
-        } else {
-          newMode = nil
+      case (BMAPFunctionBlock.settings, BMAPFunction.cnc) where packet.payload.count >= 2:
+        let step = packet.payload[1]
+        let stepChanged = (step != cncLevel)
+        cncLevel = step
+        if Date().timeIntervalSince(lastModeChangeTime) >= 1.5 {
+          let newMode: NoiseMode? = step == 0 ? .quiet : (step == 10 ? .aware : nil)
+          if stepChanged || newMode != currentMode {
+            AppLog.device.info(
+              "📡 CNC change: step \(step) -> \(newMode?.label ?? "Level \(step)", privacy: .public)"
+            )
+            currentMode = newMode
+            snapshot = snapshot ?? BoseStateSnapshot()
+            snapshot?.cncLevel = step
+            snapshot?.currentMode = .some(newMode)
+          }
         }
-        if stepChanged || newMode != currentMode {
+
+      case (BMAPFunctionBlock.settings, BMAPFunction.cncFavorites) where packet.payload.count >= 4:
+        let newFav = CncFavorites(
+          activeIndex: Int(packet.payload[0]), preset0: Int(packet.payload[1]),
+          preset1: Int(packet.payload[2]), preset2: Int(packet.payload[3]))
+        if newFav != cncFavorites {
           AppLog.device.info(
-            "📡 CNC change: step \(step) -> \(newMode?.label ?? "Level \(step)", privacy: .public)")
-          currentMode = newMode
-          DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+            "📡 CNC favorites change: active=\(newFav.activeIndex) [\(newFav.preset0), \(newFav.preset1), \(newFav.preset2)]"
+          )
+          cncFavorites = newFav
+          snapshot = snapshot ?? BoseStateSnapshot()
+          snapshot?.cncFavorites = newFav
         }
-      }
-    }
 
-    // Unsolicited CNC Favorites change [1.15] (Left physical button press)
-    if bytes.count >= 8 && bytes[0] == BMAPFunctionBlock.settings
-      && bytes[1] == BMAPFunction.cncFavorites && bytes[2] & 0x0F == BMAPOperator.status.rawValue
-    {
-      let actIdx = Int(bytes[4])
-      let p0 = Int(bytes[5])
-      let p1 = Int(bytes[6])
-      let p2 = Int(bytes[7])
-      let newFav = CncFavorites(activeIndex: actIdx, preset0: p0, preset1: p1, preset2: p2)
-      if newFav.activeIndex != cncFavorites.activeIndex || newFav.preset0 != cncFavorites.preset0
-        || newFav.preset1 != cncFavorites.preset1 || newFav.preset2 != cncFavorites.preset2
-      {
-        AppLog.device.info(
-          "📡 CNC favorites change: active=\(actIdx) [\(p0), \(p1), \(p2)]")
-        cncFavorites = newFav
-        DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
-      }
-    }
-
-    // Button status / confirmation [1.9]
-    if bytes.count >= 7 && bytes[0] == BMAPFunctionBlock.settings
-      && bytes[1] == BMAPFunction.buttons && bytes[2] & 0x0F == BMAPOperator.status.rawValue
-    {
-      let actRaw = bytes[6]
-      if let act = ShortcutAction(rawValue: actRaw) {
-        if act != shortcutAction {
+      case (BMAPFunctionBlock.settings, BMAPFunction.buttons) where packet.payload.count >= 3:
+        if let act = ShortcutAction(rawValue: packet.payload[2]), act != shortcutAction {
           AppLog.device.info("📡 Button shortcut confirmed: \(act.label, privacy: .public)")
           shortcutAction = act
-          DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+          snapshot = snapshot ?? BoseStateSnapshot()
+          snapshot?.shortcutAction = act
         }
+
+      case (BMAPFunctionBlock.audioManagement, BMAPFunction.audioSource)
+      where packet.payload.count >= 9:
+        let newMac = packet.payload[3..<9].map { String(format: "%02x", $0) }.joined(separator: ":")
+        if newMac != activeSourceMac {
+          activeSourceMac = newMac
+          AppLog.device.info("📡 Active audio source change: \(newMac, privacy: .public)")
+          snapshot = snapshot ?? BoseStateSnapshot()
+          snapshot?.activeSourceMac = .some(newMac)
+        }
+
+      case (BMAPFunctionBlock.audioManagement, BMAPFunction.volume) where packet.payload.count >= 2:
+        let newVol = VolumeInfo(current: packet.payload[1], max: packet.payload[0])
+        if newVol != volumeInfo {
+          volumeInfo = newVol
+          AppLog.device.info(
+            "📡 Volume change: \(newVol.current)/\(newVol.max) (\(newVol.percentage)%)")
+          snapshot = snapshot ?? BoseStateSnapshot()
+          snapshot?.volumeInfo = newVol
+        }
+
+      default:
+        break
       }
     }
 
-    // Unsolicited Audio Source change [5.1]
-    if bytes.count >= 13 && bytes[0] == BMAPFunctionBlock.audioManagement
-      && bytes[1] == BMAPFunction.audioSource && bytes[2] & 0x0F == BMAPOperator.status.rawValue
-    {
-      let activeMacBytes = Array(bytes[7..<13])
-      let newMac = activeMacBytes.map { String(format: "%02x", $0) }.joined(separator: ":")
-      if newMac != activeSourceMac {
-        activeSourceMac = newMac
-        AppLog.device.info(
-          "📡 Active audio source change: \(newMac, privacy: .public)"
-        )
-        DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
-      }
+    if let snapshot {
+      onSnapshot?(snapshot)
     }
 
-    // Unsolicited Volume change [5.5]
-    if bytes.count >= 6 && bytes[0] == BMAPFunctionBlock.audioManagement
-      && bytes[1] == BMAPFunction.volume && bytes[2] & 0x0F == BMAPOperator.status.rawValue
-    {
-      let maxVol = bytes[4]
-      let curVol = bytes[5]
-      if curVol != volumeInfo.current || maxVol != volumeInfo.max {
-        volumeInfo = VolumeInfo(current: curVol, max: maxVol)
-        AppLog.device.info(
-          "📡 Volume change: \(curVol)/\(maxVol) (\(self.volumeInfo.percentage)%)")
-        DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
-      }
+    if expectedFBlock == packet.functionBlock && expectedFuncID == packet.functionID {
+      responsePacket = packet
+      responseReceived = true
     }
-
-    responseData = bytes
-    responseReceived = true
   }
 
-  public func rfcommChannelClosed(_ rfcommChannel: IOBluetoothRFCOMMChannel!) {
+  func rfcommChannelClosed(_ rfcommChannel: IOBluetoothRFCOMMChannel!) {
     AppLog.bluetooth.notice("RFCOMM channel closed")
     channel = nil
     isConnected = false
     stopPollTimer()
-    startReconnectTimer()
-    DispatchQueue.main.async { [weak self] in self?.onUpdate?() }
+    scheduleReconnectTimer()
+    onSnapshot?(BoseStateSnapshot(isConnected: false))
   }
 
-  // MARK: - Timers
+  // MARK: - Timers (btThread only)
 
-  private func startReconnectTimer() {
+  private func scheduleReconnectTimer() {
     stopReconnectTimer()
-    perform(#selector(scheduleReconnectTimer), on: btThread!, with: nil, waitUntilDone: false)
-  }
-
-  @objc private func scheduleReconnectTimer() {
     reconnectTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
-      guard let self = self else { return }
+      guard let self else { return }
       if self.channel == nil {
         AppLog.bluetooth.info("Auto-reconnect attempt...")
         self.doConnect()
@@ -1156,14 +1169,10 @@ public class BoseDevice: NSObject, IOBluetoothRFCOMMChannelDelegate {
     reconnectTimer = nil
   }
 
-  private func startPollTimer() {
+  private func schedulePollTimer() {
     stopPollTimer()
-    perform(#selector(schedulePollTimer), on: btThread!, with: nil, waitUntilDone: false)
-  }
-
-  @objc private func schedulePollTimer() {
     pollTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-      guard let self = self, self.channel != nil else { return }
+      guard let self, self.channel != nil else { return }
       self.doRefreshState()
     }
   }
