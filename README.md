@@ -55,13 +55,15 @@ The menu bar shows a headphone icon with battery percentage and current mode ind
 
 1. Grab the latest `ANChor-vX.Y.Z.zip` from the [Releases page](https://github.com/mathismueller/ANChor/releases).
 2. Unzip and move `ANChor.app` to `/Applications`.
-3. **First launch:** right-click `ANChor.app` → **Open** → confirm. macOS Gatekeeper shows a warning the first time because the build is ad-hoc signed (not notarized through the Apple Developer Program). After the first launch it opens normally.
-
-If you'd rather not right-click, you can also clear the quarantine attribute from a terminal:
+3. **First launch:** the build is ad-hoc signed (not notarized through the Apple Developer Program), so macOS Gatekeeper will block it the first time:
+   - Try to open `ANChor.app` once and dismiss the warning, then go to **System Settings → Privacy & Security** and click **Open Anyway**.
+   - Or clear the quarantine attribute from a terminal:
 
 ```bash
 xattr -d com.apple.quarantine /Applications/ANChor.app
 ```
+
+After the first launch, it opens normally.
 
 ### Build from source
 
